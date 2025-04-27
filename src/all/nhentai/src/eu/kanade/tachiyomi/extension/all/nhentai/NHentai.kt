@@ -35,6 +35,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import rx.Observable
 import uy.kohesive.injekt.injectLazy
+import java.util.concurrent.TimeUnit
 
 open class NHentai(
     override val lang: String,
@@ -61,6 +62,8 @@ open class NHentai(
                 filterInclude = listOf("chrome"),
             )
             .rateLimit(4)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .build()
     }
 
@@ -97,7 +100,7 @@ open class NHentai(
 
     override fun latestUpdatesRequest(page: Int) = GET(if (nhLang.isBlank()) "$baseUrl/?page=$page" else "$baseUrl/language/$nhLang/?page=$page", headers)
 
-    override fun latestUpdatesSelector() = "#content .container:not(.index-popular) .gallery"
+    override fun latestUpdatesSelector() = "#content .container:not(.index-popular) .gallery:not(.blacklisted)"
 
     override fun latestUpdatesFromElement(element: Element) = SManga.create().apply {
         setUrlWithoutDomain(element.select("a").attr("href"))
@@ -133,6 +136,12 @@ open class NHentai(
                     .map { response -> searchMangaByIdParse(response, query) }
             }
             else -> super.fetchSearchManga(page, query, filters)
+        }.flatMap { mangasPage ->
+            if (mangasPage.mangas.isEmpty() && mangasPage.hasNextPage) {
+                fetchSearchManga(page + 1, query, filters)
+            } else {
+                Observable.just(mangasPage)
+            }
         }
     }
 
@@ -146,7 +155,6 @@ open class NHentai(
 
         if (favoriteFilter?.state == true) {
             val url = "$baseUrl/favorites/".toHttpUrl().newBuilder()
-                .addQueryParameter("q", "$query $advQuery")
                 .addQueryParameter("page", offsetPage.toString())
 
             return GET(url.build(), headers)
@@ -215,7 +223,9 @@ open class NHentai(
         val data = json.parseAs<Hentai>()
         return SManga.create().apply {
             title = if (displayFullTitle) data.title.english ?: data.title.japanese ?: data.title.pretty!! else data.title.pretty ?: (data.title.english ?: data.title.japanese)!!.shortenTitle()
-            thumbnail_url = document.select("#cover > a > img").attr("data-src")
+            thumbnail_url = document.selectFirst("#cover > a > img")!!.let { img ->
+                if (img.hasAttr("data-src")) img.attr("abs:data-src") else img.attr("abs:src")
+            }
             status = SManga.COMPLETED
             artist = getArtists(data)
             author = getGroups(data) ?: getArtists(data)
@@ -318,11 +328,11 @@ open class NHentai(
     private class SortFilter : UriPartFilter(
         "Sort By",
         arrayOf(
+            Pair("Recent", ""),
             Pair("Popular: All Time", "popular"),
             Pair("Popular: Month", "popular-month"),
             Pair("Popular: Week", "popular-week"),
             Pair("Popular: Today", "popular-today"),
-            Pair("Recent", "date"),
         ),
     )
 
