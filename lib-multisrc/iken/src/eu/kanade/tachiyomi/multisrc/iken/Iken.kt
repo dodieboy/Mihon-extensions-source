@@ -67,7 +67,19 @@ abstract class Iken(
         return MangasPage(entries, false)
     }
 
-    override fun latestUpdatesRequest(page: Int) = searchMangaRequest(page, "", getFilterList())
+    override fun latestUpdatesRequest(page: Int): Request {
+        val url = "$apiUrl/api/posts".toHttpUrl().newBuilder().apply {
+            addQueryParameter("page", page.toString())
+            addQueryParameter("perPage", perPage.toString())
+            if (apiUrl.startsWith("https://api.", true)) {
+                addQueryParameter("tag", "latestUpdate")
+                addQueryParameter("isNovel", "false")
+            }
+        }.build()
+
+        return GET(url, headers)
+    }
+
     override fun latestUpdatesParse(response: Response) = searchMangaParse(response)
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
@@ -127,7 +139,7 @@ abstract class Iken(
         val userId = userIdRegex.find(response.body.string())?.groupValues?.get(1) ?: ""
 
         val id = response.request.url.fragment!!
-        val chapterUrl = "$apiUrl/api/chapters?postId=$id&skip=0&take=1000&order=desc&userid=$userId"
+        val chapterUrl = "$apiUrl/api/chapters?postId=$id&skip=0&take=900&order=desc&userid=$userId"
         val chapterResponse = client.newCall(GET(chapterUrl, headers)).execute()
 
         val data = chapterResponse.parseAs<Post<ChapterListResponse>>()
