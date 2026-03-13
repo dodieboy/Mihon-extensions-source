@@ -25,7 +25,6 @@ import keiyoushi.lib.randomua.getPrefCustomUA
 import keiyoushi.lib.randomua.getPrefUAType
 import keiyoushi.lib.randomua.setRandomUserAgent
 import keiyoushi.utils.getPreferencesLazy
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -123,26 +122,12 @@ open class NHentai(
 
     override fun popularMangaNextPageSelector() = latestUpdatesNextPageSelector()
 
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        return when {
-            query.startsWith(PREFIX_ID_SEARCH) -> {
-                val id = query.removePrefix(PREFIX_ID_SEARCH)
-                client.newCall(searchMangaByIdRequest(id))
-                    .asObservableSuccess()
-                    .map { response -> searchMangaByIdParse(response, id) }
-            }
-            query.toIntOrNull() != null -> {
-                client.newCall(searchMangaByIdRequest(query))
-                    .asObservableSuccess()
-                    .map { response -> searchMangaByIdParse(response, query) }
-            }
-            else -> super.fetchSearchManga(page, query, filters)
-        }.flatMap { mangasPage ->
-            if (mangasPage.mangas.isEmpty() && mangasPage.hasNextPage) {
-                fetchSearchManga(page + 1, query, filters)
-            } else {
-                Observable.just(mangasPage)
-            }
+    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = when {
+        query.startsWith(PREFIX_ID_SEARCH) -> {
+            val id = query.removePrefix(PREFIX_ID_SEARCH)
+            client.newCall(searchMangaByIdRequest(id))
+                .asObservableSuccess()
+                .map { response -> searchMangaByIdParse(response, id) }
         }
 
         query.toIntOrNull() != null -> {
@@ -152,6 +137,12 @@ open class NHentai(
         }
 
         else -> super.fetchSearchManga(page, query, filters)
+    }.flatMap { mangasPage ->
+        if (mangasPage.mangas.isEmpty() && mangasPage.hasNextPage) {
+            fetchSearchManga(page + 1, query, filters)
+        } else {
+            Observable.just(mangasPage)
+        }
     }
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
@@ -333,16 +324,17 @@ open class NHentai(
 
     private class FavoriteFilter : Filter.CheckBox("Show favorites only", false)
 
-    private class SortFilter : UriPartFilter(
-        "Sort By",
-        arrayOf(
-            Pair("Recent", ""),
-            Pair("Popular: All Time", "popular"),
-            Pair("Popular: Month", "popular-month"),
-            Pair("Popular: Week", "popular-week"),
-            Pair("Popular: Today", "popular-today"),
-        ),
-    )
+    private class SortFilter :
+        UriPartFilter(
+            "Sort By",
+            arrayOf(
+                Pair("Recent", ""),
+                Pair("Popular: All Time", "popular"),
+                Pair("Popular: Month", "popular-month"),
+                Pair("Popular: Week", "popular-week"),
+                Pair("Popular: Today", "popular-today"),
+            ),
+        )
 
     private inline fun <reified T> String.parseAs(): T {
         val data = Regex("""\\u([0-9A-Fa-f]{4})""").replace(this) {
