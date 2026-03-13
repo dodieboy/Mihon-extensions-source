@@ -1,9 +1,7 @@
 ext {
     extName = 'Pluma Comics'
     extClass = '.PlumaComics'
-    themePkg = 'yuyu'
-    baseUrl = 'https://new.plumacomics.cloud'
-    overrideVersionCode = 41
+    extVersionCode = 44
     isNsfw = false
 }
 

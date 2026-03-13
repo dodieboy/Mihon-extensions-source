@@ -2,8 +2,8 @@ ext {
     extName = 'SamuraiScan'
     extClass = '.SamuraiScan'
     themePkg = 'madara'
-    baseUrl = 'https://samurai.rzword.xyz'
-    overrideVersionCode = 14
+    baseUrl = 'https://samurai.j5z.xyz'
+    overrideVersionCode = 16
     isNsfw = false
 }
 

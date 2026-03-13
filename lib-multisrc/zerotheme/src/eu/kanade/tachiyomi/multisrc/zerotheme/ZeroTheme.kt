@@ -27,7 +27,7 @@ abstract class ZeroTheme(
 
     open val cdnUrl: String = "https://cdn.${baseUrl.substringAfterLast("/")}"
 
-    open val imageLocation: String = "images"
+    open val imageLocation: String = "/images"
 
     open val mangaSubString: String by lazy {
         val response = client.newCall(GET(baseUrl, headers)).execute()
@@ -42,7 +42,7 @@ abstract class ZeroTheme(
 
     open val chapterSubString: String = "chapter"
 
-    private val sourceLocation: String get() = "$cdnUrl/$imageLocation"
+    open val sourceLocation: String get() = "$cdnUrl$imageLocation"
 
     // =========================== Popular ================================
 
@@ -54,8 +54,7 @@ abstract class ZeroTheme(
 
     override fun latestUpdatesRequest(page: Int) = GET(baseUrl, headers)
 
-    override fun latestUpdatesParse(response: Response): MangasPage =
-        MangasPage(response.toDto<LatestDto>().toSMangaList(sourceLocation), hasNextPage = false)
+    override fun latestUpdatesParse(response: Response): MangasPage = MangasPage(response.toDto<LatestDto>().toSMangaList(sourceLocation), hasNextPage = false)
 
     // =========================== Search =================================
 
@@ -99,8 +98,7 @@ abstract class ZeroTheme(
         return GET(getChapterUrl(chapter), headers)
     }
 
-    override fun pageListParse(response: Response): List<Page> =
-        response.toDto<PageDto>().toPageList(sourceLocation)
+    override fun pageListParse(response: Response): List<Page> = response.toDto<PageDto>().toPageList(sourceLocation)
 
     override fun imageUrlParse(response: Response) = ""
 

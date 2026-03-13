@@ -2,9 +2,6 @@ package eu.kanade.tachiyomi.extension.all.webtoons
 
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.lib.cookieinterceptor.CookieInterceptor
-import eu.kanade.tachiyomi.lib.textinterceptor.TextInterceptor
-import eu.kanade.tachiyomi.lib.textinterceptor.TextInterceptorHelper
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
@@ -16,6 +13,9 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.lib.cookieinterceptor.CookieInterceptor
+import keiyoushi.lib.textinterceptor.TextInterceptor
+import keiyoushi.lib.textinterceptor.TextInterceptorHelper
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
@@ -27,13 +27,15 @@ import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
 import rx.Observable
 import java.net.SocketException
+import java.text.DecimalFormat
 import java.util.Calendar
 
 open class Webtoons(
     override val lang: String,
     private val langCode: String = lang,
     localeForCookie: String = lang,
-) : HttpSource(), ConfigurableSource {
+) : HttpSource(),
+    ConfigurableSource {
     override val name = "Webtoons.com"
     override val baseUrl = "https://www.webtoons.com"
     private val mobileUrl = "https://m.webtoons.com"
@@ -92,12 +94,10 @@ open class Webtoons(
         return MangasPage(entries, hasNextPage)
     }
 
-    private fun mangaFromElement(element: Element): SManga {
-        return SManga.create().apply {
-            setUrlWithoutDomain(element.absUrl("href"))
-            title = element.selectFirst(".title")!!.text()
-            thumbnail_url = element.selectFirst("img")?.absUrl("src")
-        }
+    private fun mangaFromElement(element: Element): SManga = SManga.create().apply {
+        setUrlWithoutDomain(element.absUrl("href"))
+        title = element.selectFirst(".title")!!.text()
+        thumbnail_url = element.selectFirst("img")?.absUrl("src")
     }
 
     override fun latestUpdatesRequest(page: Int): Request {
@@ -148,11 +148,9 @@ open class Webtoons(
         return super.fetchSearchManga(page, query, filters)
     }
 
-    override fun getFilterList(): FilterList {
-        return FilterList(
-            SearchType(),
-        )
-    }
+    override fun getFilterList(): FilterList = FilterList(
+        SearchType(),
+    )
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = baseUrl.toHttpUrl().newBuilder().apply {
@@ -180,11 +178,9 @@ open class Webtoons(
         return MangasPage(entries, hasNextPage)
     }
 
-    override fun fetchMangaDetails(manga: SManga): Observable<SManga> {
-        return client.newCall(mangaDetailsRequest(manga))
-            .asObservableSuccess()
-            .map { mangaDetailsParse(it, manga) }
-    }
+    override fun fetchMangaDetails(manga: SManga): Observable<SManga> = client.newCall(mangaDetailsRequest(manga))
+        .asObservableSuccess()
+        .map { mangaDetailsParse(it, manga) }
 
     private fun mangaDetailsParse(response: Response, oldManga: SManga): SManga {
         val document = response.asJsoup()
@@ -232,9 +228,7 @@ open class Webtoons(
         }
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        throw UnsupportedOperationException()
-    }
+    override fun mangaDetailsParse(response: Response): SManga = throw UnsupportedOperationException()
 
     override fun chapterListRequest(manga: SManga): Request {
         val webtoonUrl = getMangaUrl(manga).toHttpUrl()
@@ -250,8 +244,10 @@ open class Webtoons(
                 when (path[0]) {
                     // "/episodeList?titleNo=1049"
                     "episodeList" -> "webtoon"
+
                     // "/challenge/episodeList?titleNo=304446"
                     "challenge" -> "canvas"
+
                     else -> throw Exception("Migrate from $name to $name")
                 }
             } else {
@@ -297,7 +293,7 @@ open class Webtoons(
             }
         }
 
-        if (unrecognized > recognized) {
+        if (useSequentialNumberingPref() || unrecognized > recognized) {
             chapters.onEachIndexed { index, chapter ->
                 chapter.chapterNumber = (index + 1).toFloat()
             }
@@ -331,12 +327,16 @@ open class Webtoons(
             }
         }
 
+        val numberFormatter = DecimalFormat("#.##")
         return chapters.map { episode ->
             SChapter.create().apply {
                 url = episode.viewerLink
-                name = Parser.unescapeEntities(episode.episodeTitle, false)
-                if (episode.hasBgm) {
-                    name += " ♫"
+                name = buildString {
+                    append(Parser.unescapeEntities(episode.episodeTitle, false))
+                    append(" (ch. ", numberFormatter.format(episode.chapterNumber), ")")
+                    if (episode.hasBgm) {
+                        append(" ♫")
+                    }
                 }
                 date_upload = episode.exposureDateMillis
                 chapter_number = episode.chapterNumber
@@ -348,7 +348,7 @@ open class Webtoons(
     // possible bonus/mini/special episode - 6 capture group
     // episode number - 11 capture group
     private val episodeNoRegex = Regex(
-        """(?:(s(eason)?|part|vol(ume)?)\s*\.?\s*(\d+).*?)?(.*?(mini|bonus|special).*?)?(e(p(isode)?)?|ch(apter)?)\s*\.?\s*(\d+(\.\d+)?)""",
+        """(?:(s(eason)?|saison|part|vol(ume)?)\s*\.?\s*(\d+).*?)?(.*?(mini|bonus|special).*?)?(e(p(isode)?)?|ch(apter)?)\s*\.?\s*(\d+(\.\d+)?)""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -411,6 +411,7 @@ open class Webtoons(
 
     private fun showAuthorsNotesPref() = preferences.getBoolean(SHOW_AUTHORS_NOTES_KEY, false)
     private fun useMaxQualityPref() = preferences.getBoolean(USE_MAX_QUALITY_KEY, false)
+    private fun useSequentialNumberingPref() = preferences.getBoolean(USE_SEQUENTIAL_NUMBERING_KEY, false)
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         SwitchPreferenceCompat(screen.context).apply {
@@ -426,13 +427,19 @@ open class Webtoons(
             summary = "Enable to load images in maximum quality."
             setDefaultValue(false)
         }.also(screen::addPreference)
+
+        SwitchPreferenceCompat(screen.context).apply {
+            key = USE_SEQUENTIAL_NUMBERING_KEY
+            title = "Use sequential chapter numbering"
+            summary = "Enable to use sequential numbering instead of official episode numbers."
+            setDefaultValue(false)
+        }.also(screen::addPreference)
     }
 
-    override fun imageUrlParse(response: Response): String {
-        throw UnsupportedOperationException()
-    }
+    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 }
 
 private const val SHOW_AUTHORS_NOTES_KEY = "showAuthorsNotes"
 private const val USE_MAX_QUALITY_KEY = "useMaxQuality"
+private const val USE_SEQUENTIAL_NUMBERING_KEY = "useSequentialNumbering"
 const val ID_SEARCH_PREFIX = "id:"
