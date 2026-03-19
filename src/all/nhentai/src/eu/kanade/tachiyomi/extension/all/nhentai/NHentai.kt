@@ -20,9 +20,7 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.lib.randomua.addRandomUAPreferenceToScreen
-import keiyoushi.lib.randomua.getPrefCustomUA
-import keiyoushi.lib.randomua.getPrefUAType
+import keiyoushi.lib.randomua.addRandomUAPreference
 import keiyoushi.lib.randomua.setRandomUserAgent
 import keiyoushi.utils.getPreferencesLazy
 import kotlinx.serialization.json.Json
@@ -56,16 +54,16 @@ open class NHentai(
 
     override val client: OkHttpClient by lazy {
         network.cloudflareClient.newBuilder()
-            .setRandomUserAgent(
-                userAgentType = preferences.getPrefUAType(),
-                customUA = preferences.getPrefCustomUA(),
-                filterInclude = listOf("chrome"),
-            )
             .rateLimit(4)
             .connectTimeout(20, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }
+
+    override fun headersBuilder() = super.headersBuilder()
+        .setRandomUserAgent(
+            filterInclude = listOf("chrome"),
+        )
 
     private var displayFullTitle: Boolean = when (preferences.getString(TITLE_PREF, "full")) {
         "full" -> true
@@ -95,7 +93,7 @@ open class NHentai(
             }
         }.also(screen::addPreference)
 
-        addRandomUAPreferenceToScreen(screen)
+        screen.addRandomUAPreference()
     }
 
     override fun latestUpdatesRequest(page: Int) = GET(if (nhLang.isBlank()) "$baseUrl/?page=$page" else "$baseUrl/language/$nhLang/?page=$page", headers)
@@ -236,6 +234,8 @@ open class NHentai(
             update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
         }
     }
+
+    override fun getMangaUrl(manga: SManga) = "$baseUrl${manga.url}"
 
     override fun chapterListRequest(manga: SManga): Request = GET("$baseUrl${manga.url}", headers)
 

@@ -4,6 +4,7 @@ import android.content.SharedPreferences
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
@@ -19,13 +20,17 @@ import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.extractNextJsRsc
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonString
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import rx.Observable
 import java.util.concurrent.ConcurrentHashMap
 
 abstract class Iken(
@@ -76,6 +81,14 @@ abstract class Iken(
      */
     protected open val fetchGenres: Boolean = true
 
+    /**
+     * Whether the extension should report view updates to the source website
+     * through `analytics/updateViews`.
+     *
+     * Set to false to disable sending the request.
+     */
+    protected open val sendUpdateViews: Boolean = true
+
     // Popular (Search with popular order and nothing else)
     protected open val popularFilter by lazy {
         FilterList(SortFilter("", sortFilterKey, sortOptions, sortOptions[1].second))
@@ -93,6 +106,30 @@ abstract class Iken(
     override fun latestUpdatesParse(response: Response) = searchMangaParse(response)
 
     // search
+
+    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
+        if (!query.startsWith("http")) {
+            return super.fetchSearchManga(page, query, filters)
+        }
+
+        val url = query.toHttpUrl()
+        val baseHost = baseUrl.toHttpUrl().host
+
+        if (url.host != baseHost) throw Exception("Unsupported URL")
+
+        val pathSegments = url.pathSegments
+        val slug = pathSegments.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }
+            ?: throw Exception("Invalid URL format")
+
+        val manga = SManga.create().apply {
+            this@apply.url = "$slug#"
+        }
+
+        return fetchMangaDetails(manga)
+            .map { MangasPage(listOf(it), false) }
+    }
+
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = "$apiUrl/api/query".toHttpUrl().newBuilder().apply {
             addQueryParameter("page", page.toString())
@@ -191,9 +228,7 @@ abstract class Iken(
     protected open val genreFilterKey: String = "genreIds"
 
     override fun getFilterList(): FilterList {
-        CoroutineScope(Dispatchers.IO).launch {
-            fetchGenres()
-        }
+        launchIO { fetchGenres() }
 
         val filters = mutableListOf<Filter<*>>().apply {
             addIfNotEmpty(statusFilterOptions) {
@@ -272,6 +307,29 @@ abstract class Iken(
         .parseAs<List<Genre>>()
         .map { Pair(it.name, it.id.toString()) }
 
+    /**
+     * Sends a request to update the view count.
+     *
+     * @param postId ID of the post.
+     * @param chapterId ID of the chapter.
+     */
+    private suspend fun updateViews(postId: Int? = null, chapterId: Int? = null) {
+        if (!sendUpdateViews || (postId ?: chapterId) == null) return
+
+        try {
+            client.newCall(
+                POST(
+                    "$apiUrl/api/analytics/updateViews",
+                    headers,
+                    ViewQuery(postId, chapterId)
+                        .toJsonString()
+                        .toRequestBody(JSON_MEDIA_TYPE),
+                ),
+            ).await().close()
+        } catch (_: Exception) {
+        }
+    }
+
     // details
 
     override fun getMangaUrl(manga: SManga): String {
@@ -295,6 +353,8 @@ abstract class Iken(
 
         // Detect vShield / BalooPow challenge pagege
         if (vShieldRegex.containsMatchIn(body)) throw Exception("vShield challenge detected. Open in WebView to solve it.")
+
+        launchIO { updateViews(id.toInt()) }
 
         val data = runCatching {
             body.extractNextJsRsc<Post<ChapterListResponse>>()
@@ -332,6 +392,8 @@ abstract class Iken(
 
         val pages = document.extractNextJs<Images>()!!
 
+        launchIO { updateViews(null, pages.id) }
+
         val sortedPages = if (sortPagesByFilename) {
             pages.images.sortedWith(
                 compareBy { page ->
@@ -361,9 +423,14 @@ abstract class Iken(
         }.also(screen::addPreference)
     }
 
+    private val scope = CoroutineScope(Dispatchers.IO)
+
+    protected fun launchIO(block: suspend () -> Unit) = scope.launch { block() }
+
     companion object {
         const val PER_PAGE = 18
         const val SHOW_LOCKED_CHAPTER_PREF_KEY = "pref_show_locked_chapters"
+        val JSON_MEDIA_TYPE = "application/json".toMediaType()
         val vShieldRegex = Regex("""balooPow\.min\.js|Completing challenge|publicSalt|_2__vShield_v""")
         val userIdRegex = Regex(""""user\\":\{\\"id\\":\\"([^"']+)\\"""")
     }
