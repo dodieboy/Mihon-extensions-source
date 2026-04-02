@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension.all.nhentai
 
 import android.content.SharedPreferences
+import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
@@ -62,6 +63,7 @@ open class NHentai(
         .setRandomUserAgent(
             filterInclude = listOf("chrome"),
         )
+        .add("Authorization", preferences.getString(API_KEY_PREF, "")?.let { "Key $it" } ?: "")
 
     private var displayFullTitle: Boolean = when (preferences.getString(TITLE_PREF, "full")) {
         "full" -> true
@@ -93,6 +95,13 @@ open class NHentai(
                 }
                 true
             }
+        }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
+            key = API_KEY_PREF
+            title = "API Key"
+            summary = "Optional: Enter your nhentai API key for accessing favorites and profile features"
+            setDefaultValue("")
         }.also(screen::addPreference)
 
         screen.addRandomUAPreference()
@@ -159,10 +168,10 @@ open class NHentai(
 
             return GET(url.build(), headers)
         } else {
-            val url = "$apiBaseUrl/galleries".toHttpUrl().newBuilder()
+            val url = "$apiBaseUrl/search".toHttpUrl().newBuilder()
                 // Blank query (Multi + sort by popular month/week/day) shows a 404 page
                 // Searching for `""` is a hacky way to return everything without any filtering
-                .addQueryParameter("q", "$query $nhLangSearch$advQuery".ifBlank { "\"\"" })
+                .addQueryParameter("query", "$query $nhLangSearch$advQuery".ifBlank { "\"\"" })
                 .addQueryParameter("page", offsetPage.toString())
 
             filterList.findInstance<SortFilter>()?.let { f ->
@@ -192,6 +201,16 @@ open class NHentai(
 
     private fun searchMangaByIdRequest(id: String) = GET("$apiBaseUrl/galleries/$id", headers)
 
+    private fun galleryListItemToSManga(gallery: GalleryListItem): SManga = SManga.create().apply {
+        setUrlWithoutDomain("/g/${gallery.id}/")
+        title = if (displayFullTitle) {
+            gallery.english_title
+        } else {
+            gallery.english_title.shortenTitle()
+        }
+        thumbnail_url = "https://t${Random.nextInt(1, 5)}.nhentai.net/${gallery.thumbnail}"
+    }
+
     private fun searchMangaByIdParse(response: Response, id: String): MangasPage {
         val gallery = json.decodeFromString<GalleryDetailResponse>(response.body.string())
         val details = mangaDetailsParse(gallery)
@@ -203,11 +222,17 @@ open class NHentai(
         if (response.request.url.toString().contains("/login/")) {
             val document = response.asJsoup()
             if (document.select(".fa-sign-in").isNotEmpty()) {
-                throw Exception("Log in via WebView to view favorites")
+                throw Exception("Log in via WebView or add your API key in Settings to view favorites")
             }
+            return super.searchMangaParse(response)
         }
 
-        return super.searchMangaParse(response)
+        // Parse v2 search API response
+        val searchResponse = json.decodeFromString<PaginatedResponse<GalleryListItem>>(response.body.string())
+        val mangas = searchResponse.result.filter { !it.blacklisted }.map { galleryListItemToSManga(it) }
+        val hasNextPage = searchResponse.result.isNotEmpty() && searchResponse.num_pages > 1
+
+        return MangasPage(mangas, hasNextPage)
     }
 
     override fun searchMangaFromElement(element: Element) = latestUpdatesFromElement(element)
@@ -371,7 +396,7 @@ open class NHentai(
         UriPartFilter(
             "Sort By",
             arrayOf(
-                Pair("Recent", ""),
+                Pair("Recent", "date"),
                 Pair("Popular: All Time", "popular"),
                 Pair("Popular: Month", "popular-month"),
                 Pair("Popular: Week", "popular-week"),
@@ -396,5 +421,6 @@ open class NHentai(
     companion object {
         const val PREFIX_ID_SEARCH = "id:"
         private const val TITLE_PREF = "Display manga title as:"
+        private const val API_KEY_PREF = "API Key"
     }
 }

@@ -57,6 +57,29 @@ class TagResponse(
 )
 
 @Serializable
+class PaginatedResponse<T>(
+    val result: List<T>,
+    val num_pages: Int,
+    val total: Int,
+    val per_page: Int,
+)
+
+@Serializable
+class GalleryListItem(
+    val id: Int,
+    val media_id: String,
+    val english_title: String,
+    val japanese_title: String? = null,
+    val thumbnail: String,
+    val thumbnail_width: Int? = null,
+    val thumbnail_height: Int? = null,
+    val num_pages: Int,
+    val tag_ids: List<Int> = emptyList(),
+    val blacklisted: Boolean = false,
+)
+
+// Keeping backward compatibility
+@Serializable
 class SearchResponse(
     val result: List<GalleryResult>,
     val num_pages: Int,
