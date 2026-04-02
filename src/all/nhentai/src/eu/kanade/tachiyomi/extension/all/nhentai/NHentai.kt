@@ -3,10 +3,6 @@ package eu.kanade.tachiyomi.extension.all.nhentai
 import android.content.SharedPreferences
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.extension.all.nhentai.NHUtils.getArtists
-import eu.kanade.tachiyomi.extension.all.nhentai.NHUtils.getGroups
-import eu.kanade.tachiyomi.extension.all.nhentai.NHUtils.getTagDescription
-import eu.kanade.tachiyomi.extension.all.nhentai.NHUtils.getTags
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
@@ -33,6 +29,7 @@ import org.jsoup.nodes.Element
 import rx.Observable
 import uy.kohesive.injekt.injectLazy
 import java.util.concurrent.TimeUnit
+import kotlin.random.Random
 
 open class NHentai(
     override val lang: String,
@@ -41,6 +38,7 @@ open class NHentai(
     ConfigurableSource {
 
     final override val baseUrl = "https://nhentai.net"
+    private val apiBaseUrl = "https://nhentai.net/api/v2"
 
     override val id by lazy { if (lang == "all") 7309872737163460316 else super.id }
 
@@ -71,9 +69,13 @@ open class NHentai(
     }
 
     private val shortenTitleRegex = Regex("""(\[[^]]*]|[({][^)}]*[)}])""")
-    private val dataRegex = Regex("""JSON\.parse\(\s*"(.*)"\s*\)""")
-    private val hentaiSelector = "script:containsData(JSON.parse):not(:containsData(media_server)):not(:containsData(avatar_url))"
     private fun String.shortenTitle() = this.replace(shortenTitleRegex, "").trim()
+
+    private fun String.extractGalleryId(): String = if (this.startsWith("/g/")) {
+        this.removePrefix("/g/").removeSuffix("/").substringBefore("/")
+    } else {
+        this.removePrefix("/").substringBefore("/")
+    }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         ListPreference(screen.context).apply {
@@ -157,7 +159,7 @@ open class NHentai(
 
             return GET(url.build(), headers)
         } else {
-            val url = "$baseUrl/search/".toHttpUrl().newBuilder()
+            val url = "$apiBaseUrl/galleries".toHttpUrl().newBuilder()
                 // Blank query (Multi + sort by popular month/week/day) shows a 404 page
                 // Searching for `""` is a hacky way to return everything without any filtering
                 .addQueryParameter("q", "$query $nhLangSearch$advQuery".ifBlank { "\"\"" })
@@ -188,10 +190,11 @@ open class NHentai(
         }
     }
 
-    private fun searchMangaByIdRequest(id: String) = GET("$baseUrl/g/$id", headers)
+    private fun searchMangaByIdRequest(id: String) = GET("$apiBaseUrl/galleries/$id", headers)
 
     private fun searchMangaByIdParse(response: Response, id: String): MangasPage {
-        val details = mangaDetailsParse(response)
+        val gallery = json.decodeFromString<GalleryDetailResponse>(response.body.string())
+        val details = mangaDetailsParse(gallery)
         details.url = "/g/$id/"
         return MangasPage(listOf(details), false)
     }
@@ -213,25 +216,59 @@ open class NHentai(
 
     override fun searchMangaNextPageSelector() = latestUpdatesNextPageSelector()
 
-    override fun mangaDetailsParse(document: Document): SManga {
-        val data = document.getHentaiData()
-        val cdnUrl = document.getCdnUrls(thumbnail = true).random()
-        return SManga.create().apply {
-            title = if (displayFullTitle) data.title.english ?: data.title.japanese ?: data.title.pretty!! else data.title.pretty ?: (data.title.english ?: data.title.japanese)!!.shortenTitle()
-            thumbnail_url = "https://$cdnUrl/galleries/${data.media_id}/1t.${data.images.pages[0].extension}"
-            status = SManga.COMPLETED
-            artist = getArtists(data)
-            author = getGroups(data) ?: getArtists(data)
-            // Some people want these additional details in description
-            description = "Full English and Japanese titles:\n"
-                .plus("${data.title.english ?: data.title.japanese ?: data.title.pretty ?: ""}\n")
-                .plus(data.title.japanese ?: "")
-                .plus("\n\n")
-                .plus("Pages: ${data.images.pages.size}\n")
-                .plus("Favorited by: ${data.num_favorites}\n")
-                .plus(getTagDescription(data))
-            genre = getTags(data)
-            update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
+    override fun fetchMangaDetails(manga: SManga): Observable<SManga> {
+        val galleryId = manga.url.extractGalleryId()
+        return client.newCall(GET("$apiBaseUrl/galleries/$galleryId", headers))
+            .asObservableSuccess()
+            .map { response ->
+                val gallery = json.decodeFromString<GalleryDetailResponse>(response.body.string())
+                mangaDetailsParse(gallery)
+            }
+    }
+
+    private fun mangaDetailsParse(gallery: GalleryDetailResponse): SManga = SManga.create().apply {
+        title = if (displayFullTitle) {
+            gallery.title.english ?: gallery.title.japanese ?: gallery.title.pretty!!
+        } else {
+            gallery.title.pretty ?: (gallery.title.english ?: gallery.title.japanese)!!.shortenTitle()
+        }
+        thumbnail_url = "https://t${Random.nextInt(1, 5)}.nhentai.net/${gallery.cover.thumbnail?.path ?: gallery.cover.path}"
+        status = SManga.COMPLETED
+
+        // Extract artists and groups from tags
+        val artists = gallery.tags.filter { it.type == "artist" }.map { it.name }
+        val groups = gallery.tags.filter { it.type == "group" }.map { it.name }
+
+        artist = artists.joinToString(", ").takeIf { it.isNotBlank() }
+        author = groups.joinToString(", ").takeIf { it.isNotBlank() } ?: artist
+
+        // Build description from API response
+        description = buildString {
+            appendLine("Full English and Japanese titles:")
+            appendLine(gallery.title.english ?: gallery.title.japanese ?: gallery.title.pretty ?: "")
+            appendLine(gallery.title.japanese ?: "")
+            appendLine()
+            appendLine("Pages: ${gallery.num_pages}")
+            appendLine("Favorited by: ${gallery.num_favorites}")
+            appendLine()
+            append(getApiTagDescription(gallery.tags))
+        }
+        genre = getApiTags(gallery.tags)
+        update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
+    }
+
+    private fun getApiTags(tags: List<TagResponse>): String = tags.filter { it.type == "tag" || it.type == "category" }
+        .joinToString(", ") { it.name }
+
+    private fun getApiTagDescription(tags: List<TagResponse>): String {
+        val tagMap = tags.groupBy { it.type }
+
+        return buildString {
+            tagMap.forEach { (type, tagList) ->
+                if (tagList.isNotEmpty()) {
+                    appendLine("${type.replaceFirstChar { it.uppercase() }}: ${tagList.joinToString(", ") { it.name }}")
+                }
+            }
         }
     }
 
@@ -239,14 +276,28 @@ open class NHentai(
 
     override fun chapterListRequest(manga: SManga): Request = GET("$baseUrl${manga.url}", headers)
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.asJsoup().getHentaiData()
+    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> {
+        val galleryId = manga.url.extractGalleryId()
+        return client.newCall(GET("$apiBaseUrl/galleries/$galleryId", headers))
+            .asObservableSuccess()
+            .map { response ->
+                val gallery = json.decodeFromString<GalleryDetailResponse>(response.body.string())
+                chapterListParse(gallery, manga.url)
+            }
+    }
+
+    private fun chapterListParse(gallery: GalleryDetailResponse, mangaUrl: String): List<SChapter> {
+        // Extract groups from tags
+        val groups = gallery.tags.filter { it.type == "group" }.map { it.name }
+        val artists = gallery.tags.filter { it.type == "artist" }.map { it.name }
+        val scanlator = groups.ifEmpty { artists }.joinToString(", ")
+
         return listOf(
             SChapter.create().apply {
                 name = "Chapter"
-                scanlator = getGroups(data)
-                date_upload = data.upload_date * 1000
-                setUrlWithoutDomain(response.request.url.encodedPath)
+                this.scanlator = scanlator
+                date_upload = gallery.upload_date * 1000
+                setUrlWithoutDomain(mangaUrl)
             },
         )
     }
@@ -255,35 +306,27 @@ open class NHentai(
 
     override fun chapterListSelector() = throw UnsupportedOperationException()
 
-    override fun pageListParse(document: Document): List<Page> {
-        val data = document.getHentaiData()
-        val cdnUrls = document.getCdnUrls(thumbnail = false)
+    override fun mangaDetailsParse(document: Document) = throw UnsupportedOperationException()
 
-        return data.images.pages.mapIndexed { i, image ->
-            Page(
-                index = i,
-                imageUrl = "https://${cdnUrls.random()}/galleries/${data.media_id}/${i + 1}.${image.extension}",
-            )
-        }
+    override fun pageListParse(document: Document) = throw UnsupportedOperationException()
+
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+        val galleryId = chapter.url.extractGalleryId()
+        return client.newCall(GET("$apiBaseUrl/galleries/$galleryId", headers))
+            .asObservableSuccess()
+            .map { response ->
+                val gallery = json.decodeFromString<GalleryDetailResponse>(response.body.string())
+                pageListParse(gallery)
+            }
     }
 
-    private fun Document.getHentaiData(): Hentai {
-        val script = selectFirst(hentaiSelector)!!.data()
-        return dataRegex.find(script)!!.groupValues[1].parseAs()
-    }
+    private fun pageListParse(gallery: GalleryDetailResponse): List<Page> = gallery.pages.mapIndexed { i, pageInfo ->
+        val path = pageInfo.path
 
-    private fun Document.getCdnUrls(thumbnail: Boolean): List<String> {
-        val regex = Regex(
-            if (thumbnail) {
-                """thumb_cdn_urls:\s*(\[.*])"""
-            } else {
-                """image_cdn_urls:\s*(\[.*])"""
-            },
+        Page(
+            index = i,
+            imageUrl = "https://i${Random.nextInt(1, 5)}.nhentai.net/$path",
         )
-        val html = body().html()
-        val cdnJson = regex.find(html)!!.groupValues[1]
-
-        return cdnJson.parseAs<List<String>>()
     }
 
     override fun getFilterList(): FilterList = FilterList(
