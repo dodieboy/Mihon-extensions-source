@@ -253,7 +253,7 @@ open class NHentai(
 
     private fun mangaDetailsParse(gallery: GalleryDetailResponse): SManga = SManga.create().apply {
         title = if (displayFullTitle) {
-            gallery.title.english ?: gallery.title.japanese ?: gallery.title.pretty!!
+            gallery.title.english ?: gallery.title.japanese ?: gallery.title.pretty!!.shortenTitle()
         } else {
             gallery.title.pretty ?: (gallery.title.english ?: gallery.title.japanese)!!.shortenTitle()
         }
@@ -264,8 +264,8 @@ open class NHentai(
         val artists = gallery.tags.filter { it.type == "artist" }.map { it.name }
         val groups = gallery.tags.filter { it.type == "group" }.map { it.name }
 
-        artist = artists.joinToString(", ").takeIf { it.isNotBlank() }
-        author = groups.joinToString(", ").takeIf { it.isNotBlank() } ?: artist
+        author = artists.joinToString(", ").takeIf { it.isNotBlank() }
+        artist = groups.joinToString(", ").takeIf { it.isNotBlank() }
 
         // Build description from API response
         description = buildString {
