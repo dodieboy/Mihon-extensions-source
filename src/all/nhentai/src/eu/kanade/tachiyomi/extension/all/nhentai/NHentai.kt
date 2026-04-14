@@ -163,7 +163,7 @@ open class NHentai(
             filterList.findInstance<OffsetPageFilter>()?.state?.toIntOrNull()?.plus(page) ?: page
 
         if (favoriteFilter?.state == true) {
-            val url = "$baseUrl/favorites/".toHttpUrl().newBuilder()
+            val url = "$apiBaseUrl/favorites".toHttpUrl().newBuilder()
                 .addQueryParameter("page", offsetPage.toString())
 
             return GET(url.build(), headers)
