@@ -1,78 +1,56 @@
 package eu.kanade.tachiyomi.extension.en.infinityscans
 
-import android.app.Application
-import android.os.Handler
-import android.os.Looper
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import keiyoushi.utils.runWebViewBlocking
+import okhttp3.Call
 import okhttp3.Interceptor
 import okhttp3.Response
-import uy.kohesive.injekt.injectLazy
 import java.io.IOException
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.seconds
+
+const val SESSION_COOKIE = "__Secure-infinityscans.data"
 
 class WebviewInterceptor(private val baseUrl: String) : Interceptor {
 
-    private val context: Application by injectLazy()
-    private val handler by lazy { Handler(Looper.getMainLooper()) }
-
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val origRes = chain.proceed(request)
+        val userAgent = request.header("User-Agent")
 
-        if (origRes.code != 400) return origRes
-        origRes.close()
-
-        resolveInWebview()
-
-        // If webview failed
         val response = chain.proceed(request)
-        if (response.code == 400) {
+
+        if (response.hasDeleteSessionCookie()) {
             response.close()
-            throw IOException("Solve Captcha in WebView")
+            resolveInWebview(chain.call(), userAgent)
+            val res = chain.proceed(request)
+            // If webview failed
+            if (res.hasDeleteSessionCookie()) {
+                res.close()
+                throw IOException("Solve webview Captcha and refresh.")
+            }
+            return res
         }
         return response
     }
 
-    private fun resolveInWebview() {
-        val latch = CountDownLatch(1)
-        var webView: WebView? = null
-        var hasSetCookies = false
+    private fun resolveInWebview(call: Call, userAgent: String?) {
+        runWebViewBlocking(call, timeout = 15.seconds) {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            this.userAgent = userAgent!!
 
-        handler.post {
-            val webview = WebView(context)
-            webView = webview
-            with(webview.settings) {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                databaseEnabled = true
-                useWideViewPort = false
-                loadWithOverviewMode = false
-            }
+            var hasSetCookies = false
 
-            webview.webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                    if (request?.url.toString().contains("$baseUrl/api/verification")) {
-                        hasSetCookies = true
-                    } else if (request?.url.toString().contains(baseUrl) && hasSetCookies) {
-                        latch.countDown()
-                    }
-                    return super.shouldInterceptRequest(view, request)
+            interceptRequest { request ->
+                if (request.method == "POST" && request.url.toString().contains("/api/validate")) {
+                    hasSetCookies = true
+                } else if (request.url.toString().contains(baseUrl) && hasSetCookies) {
+                    resolve(null)
                 }
+                null
             }
-
-            webview.loadUrl("$baseUrl/")
-        }
-
-        latch.await(20, TimeUnit.SECONDS)
-
-        handler.post {
-            webView?.stopLoading()
-            webView?.destroy()
-            webView = null
+            loadUrl("$baseUrl/")
         }
     }
+}
+fun Response.hasDeleteSessionCookie(): Boolean = headers("Set-Cookie").any {
+    it.startsWith(SESSION_COOKIE) && it.substringAfter(SESSION_COOKIE + "=").substringBefore(";").isEmpty()
 }

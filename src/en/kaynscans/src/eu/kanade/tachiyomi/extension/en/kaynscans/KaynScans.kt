@@ -1,16 +1,9 @@
 package eu.kanade.tachiyomi.extension.en.kaynscans
 
-import eu.kanade.tachiyomi.multisrc.keyoapp.Keyoapp
+import eu.kanade.tachiyomi.multisrc.iken.Iken
+import keiyoushi.annotation.Source
 
-class KaynScans :
-    Keyoapp(
-        "Kayn Scans",
-        "https://kaynscan.com",
-        "en",
-    ) {
-    override val descriptionSelector: String = "div.grid > div.overflow-hidden > p"
-    override val statusSelector: String = "div[alt=Status]"
-    override val authorSelector: String = "div[alt=Author]"
-    override val artistSelector: String = "div[alt=Artist]"
-    override val typeSelector: String = "div[alt='Series Type']"
+@Source
+abstract class KaynScans : Iken() {
+    override val sortPagesByFilename = true
 }

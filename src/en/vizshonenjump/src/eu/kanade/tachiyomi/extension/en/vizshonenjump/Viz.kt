@@ -1,374 +1,269 @@
 package eu.kanade.tachiyomi.extension.en.vizshonenjump
 
+import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.interceptor.rateLimit
+import eu.kanade.tachiyomi.network.awaitSuccess
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import eu.kanade.tachiyomi.util.asJsoup
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.json.Json
+import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.getPreferencesLazy
+import keiyoushi.utils.getString
+import keiyoushi.utils.getStringOrNull
+import keiyoushi.utils.obj
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.string
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.CacheControl
-import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import rx.Observable
-import uy.kohesive.injekt.injectLazy
 import java.io.IOException
-import java.text.SimpleDateFormat
+import java.time.LocalDate
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
-open class Viz(
-    final override val name: String,
-    private val servicePath: String,
-) : ParsedHttpSource() {
-
-    override val baseUrl = "https://www.viz.com"
-
-    override val lang = "en"
-
-    override val supportsLatest = true
-
-    override val client: OkHttpClient = network.cloudflareClient.newBuilder()
-        .addInterceptor(::headersIntercept)
-        .addInterceptor(::authCheckIntercept)
-        .addInterceptor(::authChapterCheckIntercept)
-        .addInterceptor(VizImageInterceptor())
-        .rateLimit(1, 1, TimeUnit.SECONDS)
-        .build()
-
-    override fun headersBuilder(): Headers.Builder = Headers.Builder()
-        .add("User-Agent", USER_AGENT)
-        .add("Origin", baseUrl)
-        .add("Referer", "$baseUrl/$servicePath")
-
-    private val json: Json by injectLazy()
-
-    private var mangaList: List<SManga>? = null
+@Source
+abstract class Viz :
+    KeiSource(),
+    ConfigurableSource {
+    private val preferences by getPreferencesLazy()
+    private val servicePath get() = if (name.contains("Shonen Jump")) "shonenjump" else "vizmanga"
+    private val searchPath get() = if (name.contains("Shonen Jump")) "SjChapterSeries" else "VmChapterSeries"
+    private val subscriber get() = if (name.contains("Shonen Jump")) "is_sj_subscriber" else "is_vm_subscriber"
 
     private var loggedIn: Boolean? = null
 
-    override fun popularMangaRequest(page: Int): Request {
-        val newHeaders = headersBuilder()
-            .set("Referer", baseUrl)
+    override fun OkHttpClient.Builder.configureClient() = apply {
+        addInterceptor(ImageInterceptor())
+        addInterceptor {
+            val request = it.request()
+            val response = it.proceed(request)
+            if (response.request.url.encodedPath == "/$servicePath") {
+                throw IOException("This service is not available in your country.")
+            }
+            response
+        }
+    }
+
+    // ============================== Popular ==============================
+
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val response = client.get("$baseUrl/manga-books/$servicePath/section/trending-manga", cacheControl = CacheControl.FORCE_NETWORK)
+        return parseMangaPage(response)
+    }
+
+    private fun parseMangaPage(response: Response): MangasPage {
+        val document = response.asJsoup()
+        val mangas = document.select("div.o_sortable > a.o_chapters-link").sortedBy { it.parent()?.attr("data-sort-recent")?.toInt() }.map(::mangaFromElement)
+        return MangasPage(mangas, false)
+    }
+
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val response = client.get("$baseUrl/manga-books/$servicePath/section/free-chapters", cacheControl = CacheControl.FORCE_NETWORK)
+        return parseMangaPage(response)
+    }
+
+    // ============================== Search ===============================
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val url = "$baseUrl/search".toHttpUrl().newBuilder()
+            .addQueryParameter("search", query)
+            .addQueryParameter("category", searchPath)
             .build()
-
-        return GET(
-            url = "$baseUrl/read/$servicePath/section/free-chapters",
-            headers = newHeaders,
-            cache = CacheControl.FORCE_NETWORK,
-        )
+        val document = client.get(url, cacheControl = CacheControl.FORCE_NETWORK).asJsoup()
+        val mangas = document.select("div.p-cs-tile a.o_property-link").map(::mangaFromElement)
+            .filter { manga -> manga.title.contains(query, true) }
+        return MangasPage(mangas, false)
     }
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        if (!response.request.url.toString().contains("section/free-chapters")) {
-            throw Exception(COUNTRY_NOT_SUPPORTED)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val service = url.pathSegments[0]
+        val seriesSlug = url.pathSegments[2]
+
+        if (service != servicePath) return null
+
+        val manga = SManga.create().apply {
+            this.url = seriesSlug
         }
 
-        val mangasPage = super.popularMangaParse(response)
-
-        mangaList = mangasPage.mangas.sortedBy { it.title }
-
-        return mangasPage
+        return getMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false)
+            .manga
+            .apply {
+                initialized = true
+            }
     }
 
-    override fun popularMangaSelector(): String = "section.section_chapters div.o_sort_container div.o_sortable > a.o_chapters-link"
-
-    override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
+    private fun mangaFromElement(element: Element): SManga = SManga.create().apply {
         title = element.selectFirst("div.pad-x-rg")!!.text()
-        thumbnail_url = element.selectFirst("div.pos-r img.disp-bl")
-            ?.attr("data-original")
-        url = element.attr("href")
+        thumbnail_url = element.selectFirst("div.pos-r img.disp-bl")?.absUrl("data-original")
+        setUrlWithoutDomain(element.absUrl("href").toHttpUrl().pathSegments[2])
     }
 
-    override fun popularMangaNextPageSelector(): String? = null
+    // ============================== Updates ==============================
 
-    override fun latestUpdatesRequest(page: Int): Request = popularMangaRequest(page)
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl/$servicePath/chapters/${manga.url}"
 
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        if (!response.request.url.toString().contains("section/free-chapters")) {
-            throw Exception(COUNTRY_NOT_SUPPORTED)
-        }
-
-        val mangasPage = super.latestUpdatesParse(response)
-
-        mangaList = mangasPage.mangas.sortedBy { it.title }
-
-        return mangasPage
+    override fun getChapterUrl(chapter: SChapter): String {
+        val chapterId = chapter.memo.getStringOrNull("id")
+            ?: throw Exception("Refresh chapter list")
+        val slug = chapter.memo.getString("slug")
+        return "$baseUrl/$servicePath/$slug/chapter/$chapterId"
     }
 
-    override fun latestUpdatesSelector() = popularMangaSelector()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga), cacheControl = CacheControl.FORCE_NETWORK).asJsoup()
 
-    override fun latestUpdatesFromElement(element: Element): SManga = popularMangaFromElement(element)
-
-    override fun latestUpdatesNextPageSelector(): String? = null
-
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        if (query.startsWith(PREFIX_URL_SEARCH)) {
-            val url = query.substringAfter(PREFIX_URL_SEARCH)
-            val service = url.split("/")[1]
-            if (service != servicePath) return Observable.just(MangasPage(emptyList(), false))
-            return fetchMangaDetails(
-                SManga.create().apply {
-                    this.url = url
-                    this.title = ""
-                    this.initialized = false
-                },
-            ).map { MangasPage(listOf(it), false) }
-        }
-        return super.fetchSearchManga(page, query, filters)
-            .map {
-                val filteredMangas = it.mangas.filter { m -> m.title.contains(query, true) }
-                MangasPage(filteredMangas, it.hasNextPage)
-            }
-    }
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = popularMangaRequest(page)
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        if (!response.request.url.toString().contains("section/free-chapters")) {
-            throw Exception(COUNTRY_NOT_SUPPORTED)
+        val seriesIntro = document.selectFirst("section#series-intro")!!
+        val sManga = SManga.create().apply {
+            url = manga.url
+            title = seriesIntro.selectFirst("h2")!!.text()
+            author = seriesIntro.selectFirst("span.disp-bl--bm")?.text()?.replace("Created by ", "")
+            description = seriesIntro.selectFirst("h2 + div")?.text()
+            thumbnail_url = document.selectFirst("meta[property=og:image]")?.absUrl("content")
+                ?: document.selectFirst("section.section_chapters td a > img")?.absUrl("data-original")
         }
 
-        return super.searchMangaParse(response)
-    }
+        val hideLocked = preferences.getBoolean(HIDE_LOCKED_PREF_KEY, false)
 
-    override fun searchMangaSelector() = popularMangaSelector()
-
-    override fun searchMangaFromElement(element: Element): SManga = popularMangaFromElement(element)
-
-    override fun searchMangaNextPageSelector(): String? = null
-
-    override fun mangaDetailsParse(document: Document): SManga {
-        val seriesIntro = document.select("section#series-intro").first()!!
-
-        // Get the thumbnail url from the manga list (if available),
-        // or fetch it for the first time (in backup restore, for example).
-        if (mangaList == null) {
-            val request = popularMangaRequest(1)
-            val response = client.newCall(request).execute()
-            // Call popularMangaParse to fill the manga list.
-            popularMangaParse(response)
-        }
-
-        val mangaUrl = document.location().substringAfter(baseUrl)
-        val mangaFromList = mangaList!!.firstOrNull { it.url == mangaUrl }
-
-        return SManga.create().apply {
-            author = seriesIntro.select("div.type-rg span").firstOrNull()?.text()
-                ?.replace("Created by ", "")
-            artist = author
-            status = SManga.ONGOING
-            description = seriesIntro.select("div.line-solid").firstOrNull()?.text()
-            thumbnail_url = if (!mangaFromList?.thumbnail_url.isNullOrEmpty()) {
-                mangaFromList!!.thumbnail_url // Can't be null in this branch
-            } else {
-                document.selectFirst("section.section_chapters td a > img")?.attr("data-original") ?: ""
-            }
-            url = mangaUrl
-            title = if (!mangaFromList?.title.isNullOrEmpty()) {
-                mangaFromList!!.title // Can't be null in this branch
-            } else {
-                seriesIntro.selectFirst("h2.type-lg")?.text() ?: ""
+        val elements = document.select("section.section_chapters a.o_chapter-container[id^=ch-]")
+        if (elements.isEmpty()) {
+            if (document.selectFirst("section.section_static") != null) {
+                throw Exception("This service is not available in your country.")
             }
         }
-    }
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val allChapters = super.chapterListParse(response)
+        val isSubscriber = checkIfIsLoggedIn()
 
-        checkIfIsLoggedIn()
+        val chapterList = elements.mapNotNull {
+            val urlStr = it.absUrl("data-target-url")
+            if (urlStr.isBlank()) return@mapNotNull null
 
-        if (loggedIn == true) {
-            return allChapters.map { oldChapter ->
-                oldChapter.apply {
-                    url = url.substringAfter("'").substringBeforeLast("'") + "&locked=true"
+            val isMarkupLocked = urlStr.startsWith("javascript")
+            val isLocked = isMarkupLocked && !isSubscriber
+            if (hideLocked && isLocked) return@mapNotNull null
+
+            val lock = if (isLocked) "🔒 " else ""
+            val dateTable = it.selectFirst("div:nth-child(1) table")
+
+            SChapter.create().apply {
+                if (dateTable == null) {
+                    name = lock + it.text()
+                } else {
+                    name = lock + (it.selectFirst("div:nth-child(2) table")?.selectFirst("td")?.text() ?: "Oneshot")
+                    dateTable.selectFirst("td[align=right], td > span")?.text()?.let { dateStr ->
+                        date_upload = runCatching {
+                            LocalDate.parse(dateStr, DATE_FORMATTER).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+                        }.getOrDefault(0L)
+                    }
+                }
+
+                chapter_number = name.substringAfter("Ch. ").substringBefore(':').trim().toFloatOrNull() ?: -1F
+                val cleanUrl = if (isMarkupLocked) urlStr.substringAfter(",'").substringBeforeLast("'") else urlStr
+                val absoluteUrl = if (cleanUrl.startsWith("http")) cleanUrl else "$baseUrl$cleanUrl"
+                val paths = absoluteUrl.toHttpUrl().pathSegments
+                url = "${paths[3]}#${paths[1]}"
+                memo = buildJsonObject {
+                    put("id", paths[3])
+                    put("slug", paths[1])
                 }
             }
-                .sortedByDescending { it.chapter_number }
-        }
+        }.sortedByDescending { it.chapter_number }
 
-        return allChapters.filter { !it.url.startsWith("javascript") }
-            .sortedByDescending { it.chapter_number }
+        return SMangaUpdate(sManga, chapterList)
     }
 
-    override fun chapterListSelector() = "section.section_chapters div.o_sortable > a.o_chapter-container, " +
-        "section.section_chapters div.o_sortable div.o_chapter-vol-container tr.o_chapter a.o_chapter-container"
+    // =============================== Pages ===============================
 
-    override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
-        val isVolume = element.select("div:nth-child(1) table").first() == null
-
-        if (isVolume) {
-            name = element.text()
-        } else {
-            val leftSide = element.select("div:nth-child(1) table").first()!!
-            val rightSide = element.select("div:nth-child(2) table").first()!!
-
-            name = rightSide.select("td").first()!!.text()
-            date_upload = leftSide.select("td[align=right]").first()!!.text().toDate()
-        }
-
-        chapter_number = name.substringAfter("Ch. ").toFloatOrNull() ?: -1F
-        scanlator = "VIZ Media"
-        url = element.attr("data-target-url")
-    }
-
-    override fun pageListRequest(chapter: SChapter): Request {
-        val mangaUrl = chapter.url
-            .substringBefore("-chapter")
-            .replace("$servicePath/", "$servicePath/chapters/")
-
-        val newHeaders = headersBuilder()
-            .set("Referer", baseUrl + mangaUrl)
-            .build()
-
-        return GET(baseUrl + chapter.url, newHeaders)
-    }
-
-    override fun pageListParse(document: Document): List<Page> {
-        val pageCount = document.select("script:containsData(var pages)").first()!!.data()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
+        val pageCount = document.selectFirst("script:containsData(var pages)")!!.data()
             .substringAfter("= ")
             .substringBefore(";")
             .toInt()
-        val mangaId = document.location()
-            .substringAfterLast("/")
-            .substringBefore("?")
 
-        return IntRange(0, pageCount).map {
-            val imageUrl = "$baseUrl/manga/get_manga_url".toHttpUrl().newBuilder()
-                .addQueryParameter("device_id", "3")
-                .addQueryParameter("manga_id", mangaId)
-                .addQueryParameter("pages", it.toString())
-                .toString()
+        checkIfIsLoggedIn()
+        val chapterId = chapter.memo.getStringOrNull("id")
+            ?: throw Exception("Refresh chapter list")
+        val hasAccess = client.newCall(pageUrlRequest(chapterId, "0")).execute().parseAs<Dto>().ok
+        if (hasAccess == 0) {
+            throw Exception("Log in via WebView and subscribe to the website's service.")
+        }
 
-            // The image URL is actually fetched in the interceptor to avoid the short
-            // time expiration it have. Using the interceptor will guarantee the requests
-            // always follow the expected order, even when downloading:
-            // imageUrlRequest -> imageRequest -> decryption
-            // By using the url field of page, while downloading through the app it will
-            // do a batch call to get all imageUrl's first and then starts downloading it,
-            // but this takes time and the imageUrl's will be already expired. The reader
-            // doesn't face this issue as it follows the expected request order.
-            Page(it, imageUrl = imageUrl)
+        return (0..pageCount).map {
+            Page(it, "$baseUrl/$chapterId#$it")
         }
     }
 
-    override fun imageUrlParse(document: Document) = ""
-
-    override fun imageRequest(page: Page): Request {
-        val newHeaders = headersBuilder()
-            .add("Accept", ACCEPT_JSON)
-            .add("X-Client-Login", (loggedIn ?: false).toString())
-            .add("X-Requested-With", "XMLHttpRequest")
-            .build()
-
-        return GET(page.imageUrl!!, newHeaders)
+    override suspend fun getImageUrl(page: Page): String {
+        val parts = page.url.toHttpUrl()
+        val chapterId = parts.pathSegments.first()
+        val index = parts.fragment!!
+        val response = client.newCall(pageUrlRequest(chapterId, index)).awaitSuccess()
+        val result = response.parseAs<Dto>()
+        return "${result.data.obj.values.first().string}#scramble"
     }
 
-    private fun checkIfIsLoggedIn(chain: Interceptor.Chain? = null) {
-        val refreshHeaders = headersBuilder()
-            .add("X-Requested-With", "XMLHttpRequest")
+    // ============================= Utilities =============================
+
+    private fun pageUrlRequest(chapterId: String, index: String): Request {
+        val login = if (loggedIn == true) "active" else "false"
+        val newHeaders = headersBuilder()
+            .set("X-Client-Login", login)
             .build()
 
-        val loginCheckRequest = GET("$baseUrl/$REFRESH_LOGIN_LINKS_URL", refreshHeaders)
-        val loginCheckResponse = chain?.proceed(loginCheckRequest)
-            ?: client.newCall(loginCheckRequest).execute()
-        val document = loginCheckResponse.asJsoup()
+        val pageUrl = "$baseUrl/manga/get_manga_url".toHttpUrl().newBuilder()
+            .addQueryParameter("device_id", "3")
+            .addQueryParameter("manga_id", chapterId)
+            .addQueryParameter("pages", index)
+            .build()
 
-        loggedIn = document.select("div#o_account-links-content").firstOrNull()
+        return GET(pageUrl, newHeaders, CacheControl.FORCE_NETWORK)
+    }
+
+    private val subcription = Regex("""var $subscriber\s*=\s*(true|false)""")
+
+    private suspend fun checkIfIsLoggedIn(): Boolean = try {
+        val document = client.get("$baseUrl/account/refresh_login_links").asJsoup()
+        loggedIn = document.selectFirst("div#o_account-links-content")
             ?.attr("logged_in")?.toBoolean() ?: false
 
-        loginCheckResponse.close()
+        document.selectFirst("script:containsData($subscriber)")?.data()
+            ?.let { subcription.find(it) }
+            ?.groupValues?.get(1)?.toBoolean() ?: false
+    } catch (_: Exception) {
+        loggedIn = false
+        false
     }
 
-    private fun headersIntercept(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val headers = request.headers.newBuilder()
-            .removeAll("Accept-Encoding")
-            .build()
-        return chain.proceed(request.newBuilder().headers(headers).build())
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        SwitchPreferenceCompat(screen.context).apply {
+            key = HIDE_LOCKED_PREF_KEY
+            title = "Hide Locked Chapters"
+            setDefaultValue(false)
+        }.also(screen::addPreference)
     }
-
-    private fun authCheckIntercept(chain: Interceptor.Chain): Response {
-        if (loggedIn == null) {
-            checkIfIsLoggedIn(chain)
-        }
-
-        return chain.proceed(chain.request())
-    }
-
-    private fun authChapterCheckIntercept(chain: Interceptor.Chain): Response {
-        val requestUrl = chain.request().url.toString()
-
-        if (!requestUrl.contains("/chapter/") || !requestUrl.contains("&locked=true")) {
-            return chain.proceed(chain.request())
-        }
-
-        val mangaId = requestUrl.substringAfterLast("/").substringBefore("?")
-
-        val authCheckHeaders = headersBuilder()
-            .add("Accept", ACCEPT_JSON)
-            .add("X-Client-Login", (loggedIn ?: false).toString())
-            .add("X-Requested-With", "XMLHttpRequest")
-            .build()
-
-        val authCheckUrl = "$baseUrl/$MANGA_AUTH_CHECK_URL".toHttpUrl().newBuilder()
-            .addQueryParameter("device_id", "3")
-            .addQueryParameter("manga_id", mangaId)
-            .toString()
-        val authCheckRequest = GET(authCheckUrl, authCheckHeaders)
-        val authCheckResponse = chain.proceed(authCheckRequest).parseAs<VizMangaAuthDto>()
-
-        if (authCheckResponse.ok == 1 && authCheckResponse.archiveInfo?.ok == 1) {
-            val newChapterUrl = chain.request().url.newBuilder()
-                .removeAllQueryParameters("locked")
-                .build()
-            val newChapterRequest = chain.request().newBuilder()
-                .url(newChapterUrl)
-                .build()
-
-            return chain.proceed(newChapterRequest)
-        }
-
-        if (authCheckResponse.archiveInfo?.error?.code == 4) {
-            throw IOException(SESSION_EXPIRED)
-        }
-
-        throw IOException(authCheckResponse.archiveInfo?.error?.message ?: AUTH_CHECK_FAILED)
-    }
-
-    private inline fun <reified T> Response.parseAs(): T = use {
-        json.decodeFromString(it.body.string())
-    }
-
-    private fun String.toDate(): Long = runCatching { DATE_FORMATTER.parse(this)?.time }
-        .getOrNull() ?: 0L
 
     companion object {
-        private const val ACCEPT_JSON = "application/json, text/javascript, */*; q=0.01"
-        const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"
-
-        private val DATE_FORMATTER by lazy {
-            SimpleDateFormat("MMMM d, yyyy", Locale.ENGLISH)
-        }
-
-        private const val COUNTRY_NOT_SUPPORTED = "Your country is not supported by the service."
-        private const val SESSION_EXPIRED = "Your session has expired, please log in through WebView again."
-        private const val AUTH_CHECK_FAILED = "Something went wrong in the auth check."
-
-        private const val REFRESH_LOGIN_LINKS_URL = "account/refresh_login_links"
-        private const val MANGA_AUTH_CHECK_URL = "manga/auth"
-
-        const val PREFIX_URL_SEARCH = "url:"
+        private val DATE_FORMATTER = DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.ENGLISH)
+        private const val HIDE_LOCKED_PREF_KEY = "hide_locked"
     }
 }

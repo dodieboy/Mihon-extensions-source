@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.extension.pt.mangaflix
 
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -9,6 +8,8 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.annotation.Source
+import keiyoushi.network.rateLimit
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import kotlinx.coroutines.CoroutineScope
@@ -20,15 +21,10 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
-class MangaFlix : HttpSource() {
-
-    override val name = "MangaFlix"
-
-    override val baseUrl = "https://mangaflix.net"
+@Source
+abstract class MangaFlix : HttpSource() {
 
     private val apiUrl = "https://api.mangaflix.net/v1"
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -112,7 +108,7 @@ class MangaFlix : HttpSource() {
         }
 
         val result = response.parseAs<SearchResponseDto>()
-        val mangas = result.data.map { item ->
+        val mangas = result.data.works.map { item ->
             SManga.create().apply {
                 title = item.name
                 thumbnail_url = item.poster?.default_url

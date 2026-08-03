@@ -1,10 +1,7 @@
 package eu.kanade.tachiyomi.extension.ja.bigcomics
 
 import eu.kanade.tachiyomi.multisrc.comiciviewer.ComiciViewer
+import keiyoushi.annotation.Source
 
-class BigComics :
-    ComiciViewer(
-        "Big Comics",
-        "https://bigcomics.jp",
-        "ja",
-    )
+@Source
+abstract class BigComics : ComiciViewer()

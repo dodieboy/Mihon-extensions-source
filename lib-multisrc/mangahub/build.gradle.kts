@@ -1,10 +1,13 @@
 plugins {
-    id("lib-multisrc")
+    alias(kei.plugins.multisrc)
 }
 
-baseVersionCode = 34
+keiyoushi {
+    baseVersionCode = 36
+    libVersion = "1.6"
 
-dependencies {
-    //noinspection UseTomlInstead
-    implementation("org.brotli:dec:0.1.2")
+    deeplink {
+        path("/manga/..*")
+        path("/chapter/..*")
+    }
 }

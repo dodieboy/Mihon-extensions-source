@@ -2,13 +2,10 @@ package eu.kanade.tachiyomi.extension.en.batcave
 
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
-import okhttp3.HttpUrl
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.util.Calendar
 
 interface UrlPartFilter {
-    fun addFilterToUrl(url: HttpUrl.Builder): Boolean
+    fun addFilterToUrl(url: StringBuilder): Boolean
 }
 
 class CheckBoxItem(name: String, val value: Int) : Filter.CheckBox(name)
@@ -22,17 +19,42 @@ open class CheckBoxFilter(
     values.map { CheckBoxItem(it.first, it.second) },
 ),
     UrlPartFilter {
-    override fun addFilterToUrl(url: HttpUrl.Builder): Boolean {
-        val checked = state.filter { it.state }
-            .also { if (it.isEmpty()) return false }
-            .joinToString(",") { it.value.toString() }
 
-        url.addPathSegments("$queryParameter=$checked/")
+    override fun addFilterToUrl(url: StringBuilder): Boolean {
+        val checked = state.filter { it.state }
+        if (checked.isEmpty()) return false
+
+        val checkedStr = checked.joinToString(",") { it.value.toString() }
+        url.append(queryParameter).append("=").append(checkedStr).append("/")
         return true
     }
 }
 
-class PublisherFilter(values: List<Pair<String, Int>>) : CheckBoxFilter("Publisher", "p", values)
+class PublisherFilter(values: List<Pair<String, Int>>) :
+    Filter.Group<CheckBoxFilter>(
+        "Publisher",
+        values.groupBy { (name, _) ->
+            val c = name.firstOrNull()?.uppercase()
+
+            when {
+                c == null || c !in "A".."Z" -> "0-9"
+                else -> c
+            }
+        }.map { (letter, chunk) ->
+            CheckBoxFilter(letter, "", chunk)
+        },
+    ),
+    UrlPartFilter {
+
+    override fun addFilterToUrl(url: StringBuilder): Boolean {
+        val selected = state.flatMap { child ->
+            child.state.filter { it.state }.map { it.value }
+        }
+        if (selected.isEmpty()) return false
+        url.append("p=").append(selected.joinToString(",")).append("/")
+        return true
+    }
+}
 
 class GenreFilter(values: List<Pair<String, Int>>) : CheckBoxFilter("Genre", "g", values)
 
@@ -47,38 +69,30 @@ class YearFilter :
         ),
     ),
     UrlPartFilter {
-    override fun addFilterToUrl(url: HttpUrl.Builder): Boolean {
+
+    override fun addFilterToUrl(url: StringBuilder): Boolean {
         var applied = false
-        val currentYear = yearFormat.format(Date()).toInt()
-        if (state[0].state.isNotBlank()) {
-            val from = try {
-                state[0].state.toInt()
-            } catch (_: NumberFormatException) {
-                throw Exception("year must be number")
-            }
-            assert(from in 1929..currentYear) {
-                "invalid start year (must be between 1929 and $currentYear)"
-            }
-            url.addPathSegments("y[from]=$from/")
+        val currentYear = Calendar.getInstance().get(Calendar.YEAR)
+
+        val fromStr = state[0].state
+        if (fromStr.isNotBlank()) {
+            val from = fromStr.toIntOrNull() ?: throw Exception("year must be number")
+            require(from in 1929..currentYear) { "invalid start year (must be between 1929 and $currentYear)" }
+            url.append("y[from]=").append(from).append("/")
             applied = true
         }
-        if (state[1].state.isNotBlank()) {
-            val to = try {
-                state[1].state.toInt()
-            } catch (_: NumberFormatException) {
-                throw Exception("year must be number")
-            }
-            assert(to in 1929..currentYear) {
-                "invalid start year (must be between 1929 and $currentYear)"
-            }
-            url.addPathSegments("y[to]=$to/")
+
+        val toStr = state[1].state
+        if (toStr.isNotBlank()) {
+            val to = toStr.toIntOrNull() ?: throw Exception("year must be number")
+            require(to in 1929..currentYear) { "invalid end year (must be between 1929 and $currentYear)" }
+            url.append("y[to]=").append(to).append("/")
             applied = true
         }
+
         return applied
     }
 }
-
-private val yearFormat = SimpleDateFormat("yyyy", Locale.ENGLISH)
 
 class SortFilter(
     select: Selection = Selection(0, false),
@@ -88,11 +102,7 @@ class SortFilter(
     select,
 ) {
     fun getSort() = sorts[state?.index ?: 0].second
-    fun getDirection() = if (state?.ascending != false) {
-        "asc"
-    } else {
-        "desc"
-    }
+    fun getDirection() = if (state?.ascending != false) "asc" else "desc"
 
     companion object {
         val POPULAR = FilterList(SortFilter(Selection(3, false)))

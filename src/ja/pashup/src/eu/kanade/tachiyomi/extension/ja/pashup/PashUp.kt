@@ -11,26 +11,22 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import keiyoushi.lib.publus.Publus.Decoder
-import keiyoushi.lib.publus.Publus.PublusInterceptor
-import keiyoushi.lib.publus.Publus.generatePages
-import keiyoushi.lib.publus.PublusPage
+import keiyoushi.annotation.Source
+import keiyoushi.lib.publus.PublusInterceptor
+import keiyoushi.lib.publus.fetchPages
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
-import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class PashUp :
+@Source
+abstract class PashUp :
     HttpSource(),
     ConfigurableSource {
-    override val name = "Pash Up!"
-    override val baseUrl = "https://pash-up.jp"
-    override val lang = "ja"
     override val supportsLatest = true
 
     private val apiUrl = "$baseUrl/pageapi"
@@ -38,7 +34,7 @@ class PashUp :
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT)
     private val preferences: SharedPreferences by getPreferencesLazy()
 
-    override val client = network.cloudflareClient.newBuilder()
+    override val client = network.client.newBuilder()
         .addInterceptor(PublusInterceptor())
         .build()
 
@@ -192,36 +188,7 @@ class PashUp :
             throw Exception("Log in via WebView and purchase this product to read.")
         }
 
-        val configRequest = GET(cPhp + "configuration_pack.json", headers)
-        val configResponse = client.newCall(configRequest).execute()
-        val packData = configResponse.parseAs<ConfigPack>().data
-        val result = Decoder(packData).decode()
-        val rootJson = result.json.parseAs<Map<String, JsonElement>>()
-        val configElement = rootJson["configuration"] ?: throw Exception("Configuration not found in decrypted JSON")
-        val container = configElement.parseAs<PublusConfiguration>()
-
-        val pageContent = container.contents.mapIndexed { index, contentEntry ->
-            val pageJson = rootJson[contentEntry.file]
-                ?: throw Exception("Page config not found for ${contentEntry.file}")
-
-            val pageConfig = pageJson.toString().parseAs<PublusPageConfig>()
-            val details = pageConfig.fileLinkInfo.pageLinkInfoList[0].page
-
-            PublusPage(
-                index = index,
-                filename = contentEntry.file,
-                no = details.no,
-                ns = details.ns,
-                ps = details.ps,
-                rs = details.rs,
-                blockWidth = details.blockWidth,
-                blockHeight = details.blockHeight,
-                width = details.size.width,
-                height = details.size.height,
-            )
-        }
-
-        return generatePages(pageContent, result.keys, cPhp)
+        return fetchPages(cPhp, headers, client)
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {

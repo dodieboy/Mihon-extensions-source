@@ -1,11 +1,7 @@
 package eu.kanade.tachiyomi.extension.es.eternalmangas
 
 import eu.kanade.tachiyomi.multisrc.iken.Iken
+import keiyoushi.annotation.Source
 
-class EternalMangas :
-    Iken(
-        "EternalMangas",
-        "es",
-        "https://eternalmangas.org",
-        "https://api.eternalmangas.org",
-    )
+@Source
+abstract class EternalMangas : Iken()

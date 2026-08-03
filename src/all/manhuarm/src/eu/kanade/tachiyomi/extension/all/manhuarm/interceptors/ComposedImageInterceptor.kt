@@ -11,7 +11,6 @@ import android.os.Build
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
-import androidx.annotation.RequiresApi
 import eu.kanade.tachiyomi.extension.all.manhuarm.Dialog
 import eu.kanade.tachiyomi.extension.all.manhuarm.Language
 import eu.kanade.tachiyomi.extension.all.manhuarm.Manhuarm.Companion.PAGE_REGEX
@@ -20,13 +19,13 @@ import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import org.jsoup.Jsoup
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 
 // The Interceptor joins the dialogues and pages of the manga.
-@RequiresApi(Build.VERSION_CODES.O)
 class ComposedImageInterceptor(
     val language: Language,
 ) : Interceptor {
@@ -119,7 +118,7 @@ class ComposedImageInterceptor(
         this::class.java.classLoader!!
             .getResourceAsStream("assets/fonts/$fontName")
             .toTypeface(fontName)
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         null
     }
 
@@ -160,7 +159,7 @@ class ComposedImageInterceptor(
     }
 
     private fun createBoxLayout(dialog: Dialog, textPaint: TextPaint): StaticLayout {
-        val text = dialog.getTextBy(language)
+        val text = dialog.getTextBy(language).cleanUp()
 
         return StaticLayout.Builder.obtain(text, 0, text.length, textPaint, dialog.width.toInt()).apply {
             setAlignment(Layout.Alignment.ALIGN_CENTER)
@@ -176,6 +175,8 @@ class ComposedImageInterceptor(
             }
         }.build()
     }
+
+    private fun String.cleanUp(): String = Jsoup.parse(this).text()
 
     private fun Canvas.draw(textPaint: TextPaint, layout: StaticLayout, dialog: Dialog, x: Float, y: Float) {
         save()

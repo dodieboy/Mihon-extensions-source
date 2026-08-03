@@ -9,6 +9,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.tryParse
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
 import okhttp3.HttpUrl
@@ -17,16 +18,12 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import uy.kohesive.injekt.injectLazy
+import java.text.SimpleDateFormat
+import java.util.Locale
 
-abstract class ZeistManga(
-    override val name: String,
-    override val baseUrl: String,
-    override val lang: String,
-) : HttpSource() {
+abstract class ZeistManga : HttpSource() {
 
     override val supportsLatest = true
-
-    override val client = network.cloudflareClient
 
     protected val json: Json by injectLazy()
 
@@ -201,16 +198,58 @@ abstract class ZeistManga(
 
     protected open val chapterCategory: String = "Chapter"
 
+    private fun fetchChapter(url: String, startIndex: Int, maxResults: Int = MAX_CHAPTER_RESULTS): ZeistMangaDto {
+        val paginationUrl = url.toHttpUrl().newBuilder()
+            .setQueryParameter("start-index", startIndex.toString())
+            .setQueryParameter("max-results", maxResults.toString()).build().toString()
+
+        val res = client.newCall(GET(paginationUrl, headers)).execute()
+        return json.decodeFromString<ZeistMangaDto>(res.body.string())
+    }
+
+    protected open val dateFormat: SimpleDateFormat by lazy {
+        SimpleDateFormat("yyyy-MM-dd", Locale.ROOT)
+    }
+
+    protected open fun parseDate(dateStr: String): Long = dateFormat.tryParse(dateStr)
+
+    open val preferChapterUpdatedDate: Boolean = false
+
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
-
+        val allEntries = mutableListOf<ZeistMangaEntryDto>()
         val url = getChapterFeedUrl(document)
-        val res = client.newCall(GET(url, headers)).execute()
 
-        val result = json.decodeFromString<ZeistMangaDto>(res.body.string())
-        return result.feed?.entry?.filter { it.category.orEmpty().any { category -> category.term == chapterCategory } }
-            ?.map { it.toSChapter(baseUrl) }
-            ?: throw Exception("Failed to parse from chapter API")
+        var startIndex = 1
+        // Get total first
+        val result = fetchChapter(url, startIndex, maxResults = 0)
+        val totalResults = (
+            result.totalResults?.t
+                ?: result.feed?.totalResults?.t
+            )?.toIntOrNull() ?: MAX_CHAPTER_RESULTS
+
+        while (allEntries.size < totalResults) {
+            val result = fetchChapter(url, startIndex)
+            val entries = result.feed?.entry ?: throw Exception("Failed to parse from chapter API")
+            if (entries.isEmpty()) break
+
+            allEntries.addAll(entries)
+            startIndex += entries.size
+        }
+        return allEntries
+            .filter { it.category.orEmpty().any { cat -> cat.term == chapterCategory } }
+            .map { entry ->
+                val updated = entry.getUpdatedDate()
+                val published = entry.getPublishedDate()
+
+                val dateStr = if (preferChapterUpdatedDate) {
+                    updated ?: published
+                } else {
+                    published ?: updated
+                }
+
+                entry.toSChapter(baseUrl, parseDate(dateStr))
+            }
     }
 
     protected open val useNewChapterFeed = false
@@ -234,7 +273,6 @@ abstract class ZeistManga(
 
         return apiUrl(chapterCategory)
             .addPathSegments(feed)
-            .addQueryParameter("max-results", MAX_CHAPTER_RESULTS.toString())
             .build().toString()
     }
 
@@ -248,7 +286,7 @@ abstract class ZeistManga(
             ?.groupValues?.get(1)
             ?: throw Exception("Failed to find chapter feed")
 
-        return "$baseUrl$feed?alt=json&start-index=1&max-results=$MAX_CHAPTER_RESULTS"
+        return "$baseUrl$feed?alt=json"
     }
 
     private val newChapterFeedRegex = """label\s*=\s*'([^']+)'""".toRegex()
@@ -439,6 +477,6 @@ abstract class ZeistManga(
 
     companion object {
         private const val MAX_MANGA_RESULTS = 20
-        const val MAX_CHAPTER_RESULTS = 999999
+        const val MAX_CHAPTER_RESULTS = 150
     }
 }

@@ -1,221 +1,174 @@
 package eu.kanade.tachiyomi.extension.en.philiascans
 
-import eu.kanade.tachiyomi.multisrc.madara.Madara
+import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
+import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.annotation.Source
+import keiyoushi.utils.firstInstanceOrNull
+import keiyoushi.utils.getPreferencesLazy
+import keiyoushi.utils.parseAs
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
+import rx.Observable
 
-class PhiliaScans :
-    Madara(
-        "Philia Scans",
-        "https://philiascans.org",
-        "en",
-    ) {
-    override val versionId: Int = 3
+@Source
+abstract class PhiliaScans :
+    HttpSource(),
+    ConfigurableSource {
 
-    override fun popularMangaRequest(page: Int): Request {
-        val url = baseUrl.toHttpUrl().newBuilder()
-            .addQueryParameter("post_type", "wp-manga")
-            .addQueryParameter("s", "")
-            .addQueryParameter("sort", "most_viewed")
-            .addQueryParameter("paged", page.toString())
-            .build()
-        return GET(url, headers)
+    override val supportsLatest = true
+
+    private val apiUrl: String
+        get() = "$baseUrl/api"
+
+    private val preferences by getPreferencesLazy()
+
+    override val client = network.client.newBuilder()
+        .addInterceptor(ImageInterceptor())
+        .build()
+
+    override fun headersBuilder() = super.headersBuilder()
+        .add("Referer", "$baseUrl/")
+
+    // ============================== Popular ==============================
+
+    override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList(SortFilter().apply { state = 2 }, OrderFilter()))
+
+    override fun popularMangaParse(response: Response): MangasPage {
+        val result = response.parseAs<SeriesResponse>()
+        val mangas = result.items.map { it.toSManga(baseUrl) }
+        return MangasPage(mangas, result.hasNextPage())
     }
 
-    override fun popularMangaSelector() = ".original .unit"
-    override val popularMangaUrlSelector = ".info a.c-title"
-    override val popularMangaUrlSelectorImg = ".poster img:not(.flag-icon)"
-    override fun popularMangaNextPageSelector() = ".pagination li:not(.disabled) .page-link[rel=next]"
+    // ============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/recently-updated/?page=$page", headers)
+    override fun latestUpdatesRequest(page: Int) = searchMangaRequest(page, "", FilterList(SortFilter(), OrderFilter()))
 
-    override fun searchRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = "$baseUrl/${searchPage(page)}".toHttpUrl().newBuilder()
-        url.addQueryParameter("post_type", "wp-manga")
-        url.addQueryParameter("s", query)
+    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
 
-        filters.forEach { filter ->
-            when (filter) {
-                is TypeFilter -> {
-                    filter.state.filter { it.state }.forEachIndexed { index, item ->
-                        url.addQueryParameter("type[$index]", item.value)
-                    }
-                }
+    // ============================== Search ===============================
 
-                is YearFilter -> {
-                    filter.state.filter { it.state }.forEachIndexed { index, item ->
-                        url.addQueryParameter("release[$index]", item.value)
-                    }
-                }
-
-                is OrderByFilter -> {
-                    url.addQueryParameter("sort", filter.toUriPart())
-                }
-
-                is GenreConditionFilter -> {
-                    if (filter.toUriPart().isNotEmpty()) {
-                        url.addQueryParameter("genre_mode", filter.toUriPart())
-                    }
-                }
-
-                is GenreList -> {
-                    filter.state.filter { it.state }.forEachIndexed { index, item ->
-                        url.addQueryParameter("genre[$index]", item.id)
-                    }
-                }
-
-                else -> {}
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        val url = "$apiUrl/manga".toHttpUrl().newBuilder()
+            .addQueryParameter("page", page.toString())
+            .addQueryParameter("perPage", "20")
+            .apply {
+                if (query.isNotBlank()) addQueryParameter("q", query)
+                addFilter("orderby", filters.firstInstanceOrNull<SortFilter>())
+                addFilter("order", filters.firstInstanceOrNull<OrderFilter>())
+                addFilter("types", filters.firstInstanceOrNull<TypeFilter>())
+                addFilter("statuses", filters.firstInstanceOrNull<StatusFilter>())
+                addFilter("genres", filters.firstInstanceOrNull<GenreFilter>())
             }
-        }
         return GET(url.build(), headers)
     }
 
-    override fun searchMangaSelector() = popularMangaSelector()
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
-
-    override val mangaDetailsSelectorTitle = "h1.serie-title"
-    override val mangaDetailsSelectorAuthor = ".stat-item:has(.stat-label:contains(Author)) .stat-value"
-    override val mangaDetailsSelectorArtist = ".stat-item:has(.stat-label:contains(Artist)) .stat-value"
-    override val mangaDetailsSelectorStatus = ".stat-item:has(.stat-label:contains(Status)) .manga"
-    override val mangaDetailsSelectorGenre = "div.genre-list a"
-    override val mangaDetailsSelectorDescription = "div.description-content"
-    override val mangaDetailsSelectorThumbnail = ".main-cover .cover"
-    override val altNameSelector = "h6.alternative-title"
-    override val seriesTypeSelector = ".stat-item:has(.stat-label:contains(Type)) .manga"
-
-    override fun mangaDetailsParse(document: Document): SManga {
-        val manga = super.mangaDetailsParse(document)
-        manga.status = parseStatus(document.selectFirst(mangaDetailsSelectorStatus)?.text())
-        return manga
-    }
-
-    private fun parseStatus(status: String?): Int = when {
-        status == null -> SManga.UNKNOWN
-        status.contains("Releasing", true) -> SManga.ONGOING
-        status.contains("Completed", true) -> SManga.COMPLETED
-        status.contains("On Hold", true) -> SManga.ON_HIATUS
-        status.contains("Canceled", true) -> SManga.CANCELLED
-        else -> SManga.UNKNOWN
-    }
-
-    override fun chapterListSelector() = "li.item:not(:has(a[href='#'])):not(:has(.fa-coins))"
-
-    override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
-        val urlElement = element.selectFirst("a")!!
-        setUrlWithoutDomain(urlElement.absUrl("href"))
-        name = element.selectFirst("zebi")!!.text()
-    }
-
-    override fun processThumbnail(url: String?, fromSearch: Boolean): String? = if (fromSearch) {
-        url?.replace(
-            // try to resolve actual cover from thumbnail, usually has -280x400 suffix
-            "-280x400.",
-            ".",
-        )
-    } else {
-        url
-    }
-
-    override val pageListParseSelector = "div#ch-images img"
-
-    override fun getFilterList(): FilterList {
-        launchIO { fetchGenres() }
-        val filters = mutableListOf<Filter<*>>(
-            Filter.Header("NOTE: Filters are applied when you search."),
-            Filter.Separator(),
-            TypeFilter(),
-            Filter.Separator(),
-            OrderByFilter(
-                intl["order_by_filter_title"],
-                orderByFilterOptions.toList(),
-                0,
-            ),
-            Filter.Separator(),
-        )
-
-        if (yearsList.isNotEmpty()) {
-            filters.add(YearFilter("Year", yearsList))
-            filters.add(Filter.Separator())
-        }
-
-        if (genresList.isNotEmpty()) {
-            filters += listOf(
-                Filter.Separator(),
-                GenreConditionFilter(
-                    intl["genre_condition_filter_title"],
-                    genreConditionFilterOptions.toList(),
-                ),
-                Filter.Separator(),
-                GenreList(
-                    intl["genre_filter_title"],
-                    genresList,
-                ),
-            )
-        } else if (fetchGenres) {
-            filters += listOf(
-                Filter.Separator(),
-                Filter.Header(intl["genre_missing_warning"]),
-            )
-        }
-
-        return FilterList(filters)
-    }
-
-    override fun genresRequest(): Request = GET("$baseUrl/?post_type=wp-manga&s=", headers)
-
-    override fun parseGenres(document: Document): List<Genre> {
-        yearsList = document.select("input[name='release[]']").mapNotNull {
-            val value = it.attr("value")
-            val label = it.nextElementSibling()?.text() ?: value
-            Pair(label, value)
-        }
-
-        return document.select("ul.genres li").mapNotNull {
-            val label = it.selectFirst("label")?.text() ?: return@mapNotNull null
-            val value = it.selectFirst("input")?.attr("value") ?: return@mapNotNull null
-            Genre(label, value)
-        }
-    }
-
-    private var yearsList: List<Pair<String, String>> = emptyList()
-
-    private class CheckBoxVal(name: String, val value: String) : Filter.CheckBox(name)
-
-    private class TypeFilter :
-        Filter.Group<CheckBoxVal>(
-            "Type",
-            listOf(
-                Pair("Manga", "manga"),
-                Pair("Manhua", "manhua"),
-                Pair("Manhwa", "manhwa"),
-                Pair("Seinen", "seinen"),
-            ).map { CheckBoxVal(it.first, it.second) },
-        )
-
-    private class YearFilter(title: String, years: List<Pair<String, String>>) :
-        Filter.Group<CheckBoxVal>(
-            title,
-            years.map { CheckBoxVal(it.first, it.second) },
-        )
-
-    override val orderByFilterOptions: Map<String, String> = mapOf(
-        intl["order_by_filter_relevance"] to "",
-        intl["order_by_filter_new"] to "recently_added",
-        intl["order_by_filter_az"] to "title_az",
-        intl["order_by_filter_views"] to "most_viewed",
+    override fun getFilterList() = FilterList(
+        Filter.Header("Note: Search and active filters are applied together"),
+        SortFilter(),
+        OrderFilter(),
+        TypeFilter(),
+        StatusFilter(),
+        GenreFilter(),
     )
 
-    override val genreConditionFilterOptions: Map<String, String> = mapOf(
-        intl["genre_condition_filter_or"] to "",
-        intl["genre_condition_filter_and"] to "and",
-    )
+    override fun searchMangaParse(response: Response) = popularMangaParse(response)
+
+    // ============================== Details ==============================
+
+    override fun mangaDetailsRequest(manga: SManga): Request = GET("$apiUrl/manga/${manga.url}", headers)
+
+    override fun mangaDetailsParse(response: Response): SManga = response.parseAs<DetailsResponse>().toSManga(baseUrl)
+
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl/series/${manga.url}"
+
+    // ============================= Chapters ==============================
+
+    override fun chapterListRequest(manga: SManga): Request = GET("$apiUrl/manga/${manga.url}/chapters", headers)
+
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val hideLocked = preferences.getBoolean(HIDE_LOCKED_PREF_KEY, false)
+        val slug = response.request.url.pathSegments[2]
+        return response.parseAs<ChapterResponse>().items
+            .filter { !hideLocked || !it.isLocked }
+            .map { it.toSChapter(slug) }
+    }
+
+    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/series/${chapter.url}"
+
+    // =============================== Pages ===============================
+
+    override fun pageListRequest(chapter: SChapter): Request {
+        val parts = chapter.url.split("/")
+        val mangaSlug = parts.first()
+        val chapterSlug = parts.last()
+        return GET("$apiUrl/manga/$mangaSlug/chapters/$chapterSlug", headers)
+    }
+
+    private val tokenHeaders = headersBuilder()
+        .set("Accept", "application/json")
+        .set("Accept-Language", "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7,ja;q=0.6")
+        .set("Sec-Fetch-Mode", "cors")
+        .set("X-Requested-With", "XMLHttpRequest")
+        .build()
+
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.fromCallable {
+        val response = client.newCall(pageListRequest(chapter)).execute()
+        val result = response.parseAs<ViewerResponse>()
+        if (!result.hasAccess) throw Exception("Log in via Webview and purchased this chapter to read.")
+
+        val token = client.newCall(POST("$apiUrl/reader/access-token", tokenHeaders)).execute().parseAs<TokenResponse>().token
+        val readerHeaders = tokenHeaders.newBuilder().add("X-Reader-Access-Token", token).build()
+
+        val isScrambled = if (result.chapter.scrambled) "1" else "0"
+        val pageKeyResponse = client.newCall(GET("$apiUrl/chapters/${result.chapter.id}/page-keys", readerHeaders)).execute().parseAs<PageKeys>()
+
+        val (payloadA, payloadB) = if (pageKeyResponse.sessionDefault) {
+            val openResponse = client.newCall(POST("$apiUrl/chapters/${result.chapter.id}/open", readerHeaders)).execute().parseAs<OpenResponse>()
+            val drmCall = client.newCall(GET("$apiUrl/chapters/${result.chapter.id}/get-drm?session=${openResponse.sessionId}", readerHeaders)).execute()
+            val drmResponse = if (drmCall.isSuccessful) {
+                drmCall.parseAs<DrmResponse>()
+            } else {
+                drmCall.close()
+                null
+            }
+            openResponse.payloadA to drmResponse?.payloadB
+        } else {
+            null to null
+        }
+
+        result.chapter.pages.sortedBy { it.position }.mapIndexed { i, page ->
+            val imageUrl = if (page.url.startsWith("http")) page.url else "$baseUrl/${page.url}"
+            Page(i, imageUrl = "$imageUrl#$isScrambled;${page.mime};${pageKeyResponse.chapterKeyB64};${pageKeyResponse.gridSize};$payloadA;$payloadB;$i")
+        }
+    }
+
+    override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
+
+    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+
+    // ============================= Utilities =============================
+
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        SwitchPreferenceCompat(screen.context).apply {
+            key = HIDE_LOCKED_PREF_KEY
+            title = "Hide Locked Chapters"
+            summary = "Hide chapters that require coins to read."
+            setDefaultValue(false)
+        }.also(screen::addPreference)
+    }
+
+    companion object {
+        private const val HIDE_LOCKED_PREF_KEY = "hide_locked"
+    }
 }

@@ -1,9 +1,7 @@
 package eu.kanade.tachiyomi.extension.all.manhuarm
 
 import android.content.SharedPreferences
-import android.os.Build
 import android.widget.Toast
-import androidx.annotation.RequiresApi
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.Preference
@@ -18,38 +16,47 @@ import eu.kanade.tachiyomi.extension.all.manhuarm.translator.google.GoogleTransl
 import eu.kanade.tachiyomi.multisrc.machinetranslations.translator.TranslatorEngine
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.interceptor.rateLimit
+import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.annotation.Source
 import keiyoushi.lib.i18n.Intl
 import keiyoushi.lib.i18n.Intl.Companion.createDefaultMessageFileName
+import keiyoushi.network.rateLimit
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.encodeToString
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.brotli.BrotliInterceptor
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.util.Calendar
 import java.util.Date
-import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
-@RequiresApi(Build.VERSION_CODES.O)
-class Manhuarm(
-    private val language: Language,
-) : Madara(
-    "Manhuarm",
-    "https://manhuarmtl.com",
-    language.lang,
-),
+@Source
+abstract class Manhuarm :
+    Madara(),
     ConfigurableSource {
+
+    private val language: Language by lazy {
+        when (lang) {
+            "ar" -> Language(lang, disableFontSettings = true)
+            "fr", "id" -> Language(lang, supportNativeTranslation = true)
+            "pt-BR" -> Language(lang, "pt", supportNativeTranslation = true)
+            else -> Language(lang)
+        }
+    }
 
     override val useNewChapterEndpoint: Boolean = true
 
@@ -88,6 +95,10 @@ class Manhuarm(
         get() = preferences.getBoolean(DISABLE_TRANSLATOR_PREF, language.disableTranslator)
         set(value) = preferences.edit().putBoolean(DISABLE_TRANSLATOR_PREF, value).apply()
 
+    private var translateSynopsis: Boolean
+        get() = preferences.getBoolean(TRANSLATE_SYNOPSIS_PREF, language.translateSynopsis)
+        set(value) = preferences.edit().putBoolean(TRANSLATE_SYNOPSIS_PREF, value).apply()
+
     private var customUserAgent: String
         get() = preferences.getString(CUSTOM_UA_PREF, "")!!
         set(value) = preferences.edit().putString(CUSTOM_UA_PREF, value).apply()
@@ -106,6 +117,7 @@ class Manhuarm(
         dialogBoxScale = this@Manhuarm.dialogBoxScale,
         disableWordBreak = this@Manhuarm.disableWordBreak,
         disableTranslator = this@Manhuarm.disableTranslator,
+        translateSynopsis = this@Manhuarm.translateSynopsis,
         disableFontSettings = this@Manhuarm.fontName == DEVICE_FONT,
     )
 
@@ -131,27 +143,26 @@ class Manhuarm(
         get() {
             if (field == null || isSettingsChanged) {
                 warmupInterceptor.reset()
-                field = clientBuilder().build()
+                field = clientBuilder()
             }
             return field
         }
 
-    private val clientUtils = network.cloudflareClient.newBuilder()
-        .rateLimit(3, 2, TimeUnit.SECONDS)
+    private val clientUtils = network.client.newBuilder()
+        .rateLimit(3, 2.seconds)
         .build()
 
     private lateinit var translator: TranslatorEngine
 
-    private fun clientBuilder(): OkHttpClient.Builder {
+    private fun clientBuilder(): OkHttpClient {
         translator = when (provider) {
             "Google" -> GoogleTranslator(clientUtils, headers)
             else -> BingTranslator(clientUtils, headers)
         }
 
-        return network.cloudflareClient.newBuilder()
-            .connectTimeout(1, TimeUnit.MINUTES)
-            .readTimeout(2, TimeUnit.MINUTES)
-            .rateLimit(2, 1)
+        return network.client.newBuilder()
+            .connectTimeout(1.minutes)
+            .readTimeout(2.minutes)
             // Fix disk cache / decompression issues
             .apply {
                 val index = networkInterceptors().indexOfFirst { it is BrotliInterceptor }
@@ -163,6 +174,8 @@ class Manhuarm(
                 TranslationInterceptor(settings, translator),
             )
             .addInterceptor(ComposedImageInterceptor(settings))
+            .rateLimit(2, 1.seconds)
+            .build()
     }
 
     override fun headersBuilder(): Headers.Builder {
@@ -265,6 +278,10 @@ class Manhuarm(
     override fun mangaDetailsParse(document: Document): SManga {
         val manga = super.mangaDetailsParse(document)
 
+        if (translateSynopsis && language.target != language.origin && !manga.description.isNullOrBlank()) {
+            manga.description = translator.translate(language.origin, language.target, manga.description!!)
+        }
+
         // Ensure cover is always set from detail page if it wasn't set from listing
         if (manga.thumbnail_url.isNullOrBlank()) {
             val coverEl = document.selectFirst(".summary_image img, .wp-post-image, .item-thumb img, .manga-thumb img, img.wp-post-image")
@@ -296,18 +313,25 @@ class Manhuarm(
             .removeAllQueryParameters("style")
             .build()
 
-        // Use minimal headers for JSON request - Cloudflare may be blocking complex requests
-        val jsonHeaders = Headers.Builder()
-            .add("Referer", chapterUrl.toString())
-            .add("Accept", "*/*")
-            .add("X-Requested-With", "XMLHttpRequest")
-            .add("Cache-Control", "no-cache")
-            .build()
+        val ocrRequest = ocrUrlInterceptor.getOcrRequest(chapterUrl.toString()) ?: return pages
 
-        val ocrUrl = ocrUrlInterceptor.getUrl(chapterUrl.toString()) ?: return pages
+        val jsonHeaders = Headers.Builder().apply {
+            add("Referer", chapterUrl.toString())
+            add("Accept", "*/*")
+
+            ocrRequest.interceptedHeaders.forEach { (name, value) ->
+                set(name, value)
+            }
+        }.build()
 
         val dialog = try {
-            val response = client.newCall(GET(ocrUrl, jsonHeaders)).execute()
+            val response = client.newCall(
+                POST(
+                    ocrRequest.url,
+                    jsonHeaders,
+                    ocrRequest.body.toRequestBody("application/json; charset=utf-8".toMediaType()),
+                ),
+            ).execute()
 
             // If server returns error (403, etc), skip translations
             if (!response.isSuccessful) {
@@ -519,7 +543,18 @@ class Manhuarm(
             }.also(screen::addPreference)
         }
 
-        if (!disableTranslator) {
+        SwitchPreferenceCompat(screen.context).apply {
+            key = TRANSLATE_SYNOPSIS_PREF
+            title = i18n["translate_synopsis_title"]
+            summary = i18n["translate_synopsis_summary"]
+            setDefaultValue(language.translateSynopsis)
+            setOnPreferenceChange { _, newValue ->
+                translateSynopsis = newValue as Boolean
+                true
+            }
+        }.also(screen::addPreference)
+
+        if (!disableTranslator || translateSynopsis) {
             ListPreference(screen.context).apply {
                 key = TRANSLATOR_PROVIDER_PREF
                 title = i18n["translate_dialog_box_title"]
@@ -571,6 +606,7 @@ class Manhuarm(
         private const val DIALOG_BOX_SCALE_PREF = "dialogBoxScalePref"
         private const val DISABLE_WORD_BREAK_PREF = "disableWordBreakPref"
         private const val DISABLE_TRANSLATOR_PREF = "disableTranslatorPref"
+        private const val TRANSLATE_SYNOPSIS_PREF = "translateSynopsisPref"
         private const val TRANSLATOR_PROVIDER_PREF = "translatorProviderPref"
         private const val CUSTOM_UA_PREF = "customUserAgentPref"
         private const val DEFAULT_FONT_SIZE = "28"

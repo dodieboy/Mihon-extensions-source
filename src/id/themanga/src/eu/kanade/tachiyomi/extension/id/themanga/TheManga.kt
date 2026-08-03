@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.extension.id.themanga
 
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -10,9 +9,9 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.parseAs
+import keiyoushi.annotation.Source
+import keiyoushi.network.rateLimit
 import keiyoushi.utils.tryParse
-import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -21,21 +20,37 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 
 // Madara to HttpSource
-class TheManga : HttpSource() {
+@Source
+abstract class TheManga : HttpSource() {
 
-    override val name = "TheManga"
-    override val baseUrl = "https://themanga.my.id"
-    override val lang = "id"
-    override val supportsLatest = false
+    override val supportsLatest = true
 
     override val client = network.client.newBuilder()
         .rateLimit(2)
         .build()
 
     // =============================== Popular ================================
-    override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList())
+    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/?q=&sort=popular&page=$page", headers)
 
-    override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
+    override fun popularMangaParse(response: Response): MangasPage {
+        val document = response.asJsoup()
+
+        val mangas = document.select("a.card").map { element ->
+            SManga.create().apply {
+                setUrlWithoutDomain(element.attr("href"))
+                title = element.selectFirst(".card-title")!!.text()
+                thumbnail_url = element.selectFirst(".card-cover img")?.absUrl("src")
+            }
+        }
+
+        val hasNextPage = document.selectFirst(".explore-pagination__btn[rel=next]") != null
+        return MangasPage(mangas, hasNextPage)
+    }
+
+    // =============================== Latest =================================
+    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/?q=&sort=latest_update&page=$page", headers)
+
+    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
 
     // =============================== Search =================================
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
@@ -109,36 +124,32 @@ class TheManga : HttpSource() {
     // =============================== Pages ================================
     override fun pageListRequest(chapter: SChapter): Request {
         if (!chapter.url.contains("/chapter/")) {
-            OLD_URL_REGEX.find(chapter.url)?.let {
-                val mangaSlug = it.groupValues[1]
-                val number = it.groupValues[2].replace("-", ".")
-                val dotIndex = number.indexOf(".")
-                val formatted = if (dotIndex >= 0) {
-                    number.padEnd(dotIndex + 3, '0')
-                } else {
-                    "$number.00"
-                }
-                return GET("$baseUrl/manga/$mangaSlug/chapter/$formatted", headers)
+            // Support old Madara URLs
+            val segments = chapter.url.toHttpUrl().pathSegments
+            val mangaSlug = segments[1]
+            val number = segments[2].removePrefix("chapter-").replace("-", ".")
+            val dotIndex = number.indexOf('.')
+            val formatted = if (dotIndex >= 0) {
+                number.padEnd(dotIndex + 3, '0')
+            } else {
+                "$number.00"
             }
+
+            return GET("$baseUrl/manga/$mangaSlug/chapter/$formatted", headers)
         }
+
         return super.pageListRequest(chapter)
     }
 
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
 
-        val script = document.select("script").firstNotNullOfOrNull { PAGES_REGEX.find(it.data())?.groupValues?.get(1) }
-            ?: throw Exception("Script yang berisi data halaman tidak ditemukan")
-
-        return script.parseAs<List<PageDto>>()
-            .map { Page(it.number - 1, "", it.url) }
+        return document.select("img.page-img").mapIndexed { idx, image ->
+            Page(idx, imageUrl = image.absUrl("src"))
+        }
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
-
-    override fun latestUpdatesParse(response: Response): MangasPage = throw UnsupportedOperationException()
 
     // ============================== Filters ===============================
     override fun getFilterList(): FilterList = FilterList(
@@ -151,15 +162,7 @@ class TheManga : HttpSource() {
     // ============================== Utils ===============================
     private fun Document.meta(label: String): String? = selectFirst(".meta-item-label:matchesOwn(^$label$) + .meta-item-value")?.text()
 
-    @Serializable
-    data class PageDto(
-        val number: Int,
-        val url: String,
-    )
-
     companion object {
-        private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
-        private val PAGES_REGEX = Regex("""pages\s*=\s*(\[[\s\S]*?])""")
-        private val OLD_URL_REGEX = Regex("""/manga/([^/]+)/chapter-(\d+(?:-\d+)?)""")
+        private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.ROOT)
     }
 }

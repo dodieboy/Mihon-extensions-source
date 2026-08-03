@@ -1,68 +1,106 @@
 package eu.kanade.tachiyomi.extension.ar.dilar
 
-import android.content.SharedPreferences
-import android.widget.Toast
-import androidx.preference.ListPreference
-import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.multisrc.gmanga.Gmanga
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.source.ConfigurableSource
+import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
+import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import keiyoushi.utils.getPreferencesLazy
-import okhttp3.Request
-import okhttp3.Response
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
+import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonRequestBody
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 
-private const val MIRROR_PREF_KEY = "MIRROR"
-private const val MIRROR_PREF_TITLE = "Dilar : Mirror Urls"
-private val MIRROR_PREF_ENTRY_VALUES = arrayOf("https://dilar.tube", "https://golden.rest")
-private val MIRROR_PREF_DEFAULT_VALUE = MIRROR_PREF_ENTRY_VALUES[0]
-private const val RESTART_TACHIYOMI = ".لتطبيق الإعدادات الجديدة Tachiyomi أعد تشغيل"
+@Source
+abstract class Dilar : KeiSource() {
+    override val supportsLatest = false
 
-class Dilar :
-    Gmanga(
-        "Dilar",
-        MIRROR_PREF_DEFAULT_VALUE,
-        "ar",
-    ),
-    ConfigurableSource {
-    override fun chaptersRequest(manga: SManga): Request {
-        val mangaId = manga.url.substringAfterLast("/")
-        return GET("$baseUrl/api/mangas/$mangaId/releases", headers)
+    // Popular
+
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val response = client.get("$baseUrl/api/series?page=$page")
+        val data = response.parseAs<SeriesListDto>()
+        val entries = data.series
+            .filterNot { it.isNovel() }
+            .map { it.toSManga(::createThumbnail) }
+        return MangasPage(entries, data.hasNextPage)
     }
 
-    override fun chaptersParse(response: Response): List<SChapter> {
-        val releases = response.parseAs<ChapterListDto>().releases
-            .filterNot { it.isMonetized }
+    // Latest
 
-        return releases.map { it.toSChapter() }
+    override suspend fun getLatestUpdates(page: Int): MangasPage = throw UnsupportedOperationException()
+
+    // Search
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val body = SearchRequestDto(query, page).toJsonRequestBody()
+        val response = client.post("$baseUrl/api/search/filter", body)
+        val data = response.parseAs<SearchListDto>()
+        val entries = data.rows.filterNot { it.isNovel() }
+            .map { it.toSManga(::createThumbnail) }
+
+        return MangasPage(entries, data.hasNextPage)
     }
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        val mirrorPref = ListPreference(screen.context).apply {
-            key = MIRROR_PREF_KEY
-            title = MIRROR_PREF_TITLE
-            entries = MIRROR_PREF_ENTRY_VALUES
-            entryValues = MIRROR_PREF_ENTRY_VALUES
-            setDefaultValue(MIRROR_PREF_DEFAULT_VALUE)
-            summary = "%s"
+    // Details & Chapters
 
-            setOnPreferenceChangeListener { _, _ ->
-                Toast.makeText(screen.context, RESTART_TACHIYOMI, Toast.LENGTH_LONG).show()
-                true
-            }
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl/series/${manga.url}"
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val mangaDeferred = async {
+            if (!fetchDetails) return@async manga
+            client.get("$baseUrl/api/series/${manga.getMangaId()}")
+                .parseAs<SeriesDto>()
+                .toSManga(::createThumbnail)
         }
-        screen.addPreference(mirrorPref)
+
+        val chaptersDeferred = async {
+            if (fetchChapters) getChapterList(manga) else chapters
+        }
+
+        SMangaUpdate(
+            manga = mangaDeferred.await(),
+            chapters = chaptersDeferred.await(),
+        )
     }
 
-    private fun mirrorPref() = when {
-        System.getenv("CI") == "true" -> MIRROR_PREF_ENTRY_VALUES.joinToString("#, ")
-        else -> preferences.getString(MIRROR_PREF_KEY, MIRROR_PREF_DEFAULT_VALUE)!!
+    private suspend fun getChapterList(manga: SManga): List<SChapter> {
+        val response = client.get("$baseUrl/api/series/${manga.getMangaId()}/chapters")
+        val data = response.parseAs<ChapterListDto>()
+        return data.chapters.flatMap { chapter ->
+            chapter.releases.map { it.toSChapter(chapter, manga.url) }
+        }
     }
 
-    override val baseUrl by lazy { mirrorPref() }
+    // Pages
 
-    override val cdnUrl by lazy { baseUrl }
+    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/reader/${chapter.url.substringBeforeLast("#")}"
 
-    private val preferences: SharedPreferences by getPreferencesLazy()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val response = client.get("$baseUrl/api/chapters/${chapter.url.substringAfterLast("#")}")
+        val data = response.parseAs<PageListDto>()
+        return data.pages.sortedBy { it.order }
+            .mapIndexed { index, page ->
+                Page(index, imageUrl = "$baseUrl/uploads/releases/${data.storageKey}/hq/${page.url}")
+            }
+    }
+
+    // common
+
+    private fun SManga.getMangaId(): String = this.url.substringBeforeLast("/")
+
+    private fun createThumbnail(mangaId: String, cover: String): String {
+        val thumbnail = "large_${cover.substringBeforeLast(".")}.webp"
+
+        return "$baseUrl/uploads/manga/cover/$mangaId/$thumbnail"
+    }
 }

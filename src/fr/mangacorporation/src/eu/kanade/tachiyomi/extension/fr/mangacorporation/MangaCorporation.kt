@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.extension.fr.mangacorporation
 
 import eu.kanade.tachiyomi.multisrc.pizzareader.PizzaReader
+import keiyoushi.annotation.Source
 
-class MangaCorporation : PizzaReader("Manga-Corporation", "https://manga-corporation.com", "fr")
+@Source
+abstract class MangaCorporation : PizzaReader()

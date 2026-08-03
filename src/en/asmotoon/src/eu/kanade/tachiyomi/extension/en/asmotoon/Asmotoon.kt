@@ -2,22 +2,49 @@ package eu.kanade.tachiyomi.extension.en.asmotoon
 
 import eu.kanade.tachiyomi.multisrc.keyoapp.Keyoapp
 import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.annotation.Source
+import keiyoushi.network.rateLimit
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Request
 import org.jsoup.nodes.Document
 import java.util.Locale
+import kotlin.time.Duration.Companion.seconds
 
-class Asmotoon :
-    Keyoapp(
-        "Asmodeus Scans",
-        "https://asmotoon.com",
-        "en",
-    ) {
+@Source
+abstract class Asmotoon : Keyoapp() {
+    private val baseUrlHost by lazy { baseUrl.toHttpUrl().host }
+
+    override val client = super
+        .client
+        .newBuilder()
+        .rateLimit(3, 5.seconds) { it.host == baseUrlHost }
+        .build()
+
     // filtering novel entries
-    override fun popularMangaSelector() = "div:contains(Trending) + div .group.overflow-hidden.grid:not(:has(.capitalize:contains(Novel)))"
-    override fun latestUpdatesSelector() = "div.grid > div.group:not(:has(.capitalize:contains(Novel)))"
-    override fun searchMangaSelector() = "#searched_series_page > button:not(:has(.capitalize:contains(Novel)))"
+    override fun popularMangaSelector() = "div:contains(Trending) + div .group:not([data-type=novel])"
+    override fun latestUpdatesSelector() = ".group:not([data-type=novel])"
+    override fun searchMangaSelector() = ".group:not([data-type=novel])"
 
-    override val descriptionSelector: String = "#expand_content"
     override val genreSelector: String = ".gap-3 .gap-1 a"
+
+    private fun titleToSlug(title: String): String = title
+        .lowercase(Locale.ENGLISH)
+        .replace("[^a-z0-9\\s-]".toRegex(), "")
+        .trim()
+        .replace("[\\s-]+".toRegex(), "-")
+        .trim('-')
+
+    private fun SManga.fix(): SManga = apply {
+        url = url.replace(OLD_CHAPTER_SLUG_REGEX) { titleToSlug(title) }
+    }
+
+    override fun getMangaUrl(manga: SManga): String = super.getMangaUrl(manga.fix())
+
+    override fun chapterListRequest(manga: SManga): Request = super.chapterListRequest(manga.fix())
+
+    override fun mangaDetailsRequest(manga: SManga): Request = super.mangaDetailsRequest(manga.fix())
+
+    override fun relatedMangaListRequest(manga: SManga): Request = super.relatedMangaListRequest(manga.fix())
 
     override fun mangaDetailsParse(document: Document): SManga = super.mangaDetailsParse(document).apply {
         genre = buildList {
@@ -29,8 +56,12 @@ class Asmotoon :
                 } else {
                     it.toString()
                 }
-            }.let(::add)
+            }?.let(::add)
             document.select(genreSelector).forEach { add(it.text().removeSuffix(",")) }
         }.joinToString()
+    }
+
+    companion object {
+        private val OLD_CHAPTER_SLUG_REGEX = "(?<=/series/)[0-9a-f]{11}(?=/)".toRegex()
     }
 }

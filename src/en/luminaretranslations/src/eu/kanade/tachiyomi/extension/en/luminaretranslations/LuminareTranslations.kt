@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import kotlinx.coroutines.CoroutineScope
@@ -17,20 +18,15 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 
-class LuminareTranslations : HttpSource() {
-    override val name = "Luminare Translations"
-    override val baseUrl = "https://luminaretranslations.com"
-    override val lang = "en"
+@Source
+abstract class LuminareTranslations : HttpSource() {
     override val supportsLatest = true
 
-    private val apiUrl = "$baseUrl/api"
-    private val cdnUrl = "$baseUrl/storage"
+    private val apiUrl = "$baseUrl/wp-json/yarnovel/v1"
     private val pageSize = 24
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
-
-    override val client = network.cloudflareClient
 
     override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList(SortFilter(listOf(Filters("popular", "")))))
 
@@ -44,6 +40,7 @@ class LuminareTranslations : HttpSource() {
         val url = "$apiUrl/series".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .addQueryParameter("per_page", pageSize.toString())
+            .addQueryParameter("type", "manga")
 
         if (query.isNotBlank()) {
             url.addQueryParameter("search", query)
@@ -72,10 +69,6 @@ class LuminareTranslations : HttpSource() {
             ?.takeIf { it.isNotEmpty() }
             ?.let { url.addQueryParameter("artist", it) }
 
-        filters.firstInstanceOrNull<TypeFilter>()?.selected
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { url.addQueryParameter("type", it) }
-
         filters.firstInstanceOrNull<StatusFilter>()?.selected
             ?.takeIf { it.isNotEmpty() }
             ?.let { url.addQueryParameter("status", it) }
@@ -85,7 +78,7 @@ class LuminareTranslations : HttpSource() {
 
     override fun searchMangaParse(response: Response): MangasPage {
         val result = response.parseAs<EntryResponse>()
-        val mangas = result.data.filter { it.type !in EXCLUDED_TYPES }.map { it.toSManga(cdnUrl) }
+        val mangas = result.data.filter { it.type !in EXCLUDED_TYPES }.map { it.toSManga() }
         val page = response.request.url.queryParameter("page")!!.toInt()
         val hasNextPage = (page * pageSize) < result.meta.total
         return MangasPage(mangas, hasNextPage)
@@ -93,15 +86,15 @@ class LuminareTranslations : HttpSource() {
 
     override fun mangaDetailsRequest(manga: SManga): Request = GET("$apiUrl/series/${manga.url}", headers)
 
-    override fun mangaDetailsParse(response: Response): SManga = response.parseAs<DetailsResponse>().data.toSManga(cdnUrl)
+    override fun mangaDetailsParse(response: Response): SManga = response.parseAs<DetailsResponse>().data.toSManga()
 
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/series/${manga.url}"
 
     override fun chapterListRequest(manga: SManga): Request = GET("$apiUrl/series/${manga.url}/chapters?per_page=999", headers)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val entrySlug = response.request.url.pathSegments[2]
-        return response.parseAs<ChapterResponse>().data.map { it.toSChapter(entrySlug) }
+        val entrySlug = response.request.url.pathSegments[4]
+        return response.parseAs<ChapterResponse>().data.map { it.toSChapter(entrySlug) }.sortedBy { it.chapter_number }.reversed()
     }
 
     override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/series/${chapter.url}"
@@ -110,8 +103,8 @@ class LuminareTranslations : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val result = response.parseAs<ViewerResponse>().data
-        return result.images.map {
-            Page(it.order, imageUrl = "$cdnUrl/${it.imagePath}")
+        return result.pages.mapIndexed { i, url ->
+            Page(i, imageUrl = url)
         }
     }
 
@@ -136,8 +129,7 @@ class LuminareTranslations : HttpSource() {
         } else {
             FilterList(
                 Filter.Header("Note: Search and active filters are applied together"),
-                SortFilter(data.sorts.map { if (it.slug == "Terbaru") Filters(it.name, "Latest") else it }),
-                TypeFilter(data.types.filter { it.name !in EXCLUDED_TYPES }),
+                SortFilter(data.sorts),
                 StatusFilter(data.statuses),
                 Filter.Separator(),
                 GenreFilter(data.genres),

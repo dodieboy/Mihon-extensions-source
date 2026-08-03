@@ -1,24 +1,22 @@
 package eu.kanade.tachiyomi.multisrc.vercomics
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
-import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import rx.Observable
 
-abstract class VerComics(
-    override val name: String,
-    override val baseUrl: String,
-    override val lang: String,
-) : ParsedHttpSource() {
+abstract class VerComics : KeiSource() {
 
     override val supportsLatest: Boolean = false
 
@@ -26,27 +24,35 @@ abstract class VerComics(
     protected open val genreSuffix = ""
     protected open val useSuffixOnSearch = true
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
+    // ============================== Popular ==============================
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val response = client.get("$baseUrl/$urlSuffix/page/$page")
+        val document = response.asJsoup()
+        val mangas = document.select(popularMangaSelector()).map { popularMangaFromElement(it) }
+        val hasNextPage = document.selectFirst(popularMangaNextPageSelector()) != null
+        return MangasPage(mangas, hasNextPage)
+    }
 
-    override fun popularMangaRequest(page: Int) = GET("$baseUrl/$urlSuffix/page/$page", headers)
+    protected open fun popularMangaSelector() = "header:has(h1) ~ * .entry"
 
-    override fun popularMangaSelector() = "header:has(h1) ~ * .entry"
+    protected open fun popularMangaNextPageSelector() = "div.wp-pagenavi > span.current + a"
 
-    override fun popularMangaNextPageSelector() = "div.wp-pagenavi > span.current + a"
-
-    override fun popularMangaFromElement(element: Element) = SManga.create().apply {
-        element.select("a.popimg").first()!!.let {
-            setUrlWithoutDomain(it.attr("href"))
-            title = it.select("img").attr("alt")
+    protected open fun popularMangaFromElement(element: Element) = SManga.create().apply {
+        element.selectFirst("a.popimg")?.let {
+            setUrlWithoutDomain(it.attr("abs:href"))
+            title = it.selectFirst("img")?.attr("alt") ?: ""
             thumbnail_url = it.selectFirst("img:not(noscript img)")?.imgAttr()
         }
     }
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    // ============================== Latest ===============================
+    override suspend fun getLatestUpdates(page: Int): MangasPage = throw UnsupportedOperationException()
+
+    // ============================== Search ===============================
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         var url = baseUrl.toHttpUrl().newBuilder()
 
-        if (query.isNotBlank()) {
+        if (query.isNotEmpty()) {
             url = baseUrl.toHttpUrl().newBuilder()
             if (useSuffixOnSearch) {
                 url.addPathSegments(urlSuffix)
@@ -55,65 +61,86 @@ abstract class VerComics(
             url.addPathSegments(page.toString())
             url.addQueryParameter("s", query)
 
-            return GET(url.build(), headers)
+            val response = client.get(url.build())
+            return searchMangaParse(response.asJsoup())
         }
 
         filters.forEach { filter ->
             when (filter) {
-                is Genre -> {
-                    if (filter.toUriPart().isNotEmpty()) {
+                is GenreFilter -> {
+                    val uriPart = filter.toUriPart()
+                    if (uriPart.isNotEmpty()) {
                         url.addPathSegments(genreSuffix)
-                        url.addPathSegments(filter.toUriPart())
-
+                        url.addPathSegments(uriPart)
                         url.addPathSegments("page")
                         url.addPathSegments(page.toString())
                     }
                 }
-
                 else -> {}
             }
         }
 
-        return GET(url.build(), headers)
+        val response = client.get(url.build())
+        return searchMangaParse(response.asJsoup())
     }
 
-    override fun searchMangaSelector() = popularMangaSelector()
+    private fun searchMangaParse(document: Document): MangasPage {
+        val mangas = document.select(searchMangaSelector()).map { searchMangaFromElement(it) }
+        val hasNextPage = document.selectFirst(searchMangaNextPageSelector()) != null
+        return MangasPage(mangas, hasNextPage)
+    }
 
-    override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
+    protected open fun searchMangaSelector() = popularMangaSelector()
 
-    override fun searchMangaFromElement(element: Element) = popularMangaFromElement(element)
+    protected open fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
 
-    override fun mangaDetailsParse(document: Document) = SManga.create().apply {
-        document.select("div.tax_post").let {
-            status = SManga.COMPLETED
-            update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
-            val genreList = document.select("div.tax_box:has(div.title:contains(Etiquetas)) a[rel=tag]")
-            genre = genreList.joinToString { genre ->
-                val text = genre.text().replaceFirstChar { it.uppercase() }
-                val slug = genre.attr("href").replace("$baseUrl/$genreSuffix/", "")
-                val newPair = Pair(text, slug)
+    protected open fun searchMangaFromElement(element: Element) = popularMangaFromElement(element)
 
-                if (!genres.contains(newPair)) {
-                    genres += newPair
+    // ============================== Details ==============================
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        var sManga = manga
+
+        if (fetchDetails) {
+            val response = client.get(baseUrl + manga.url)
+            val document = response.asJsoup()
+
+            sManga = SManga.create().apply {
+                url = manga.url
+                document.selectFirst("div.tax_post")?.let {
+                    status = SManga.COMPLETED
+                    update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
+                    val genreList = document.select("div.tax_box:has(div.title:contains(Etiquetas)) a[rel=tag]")
+                    genre = genreList.joinToString { genre ->
+                        val text = genre.text().replaceFirstChar { it.uppercase() }
+                        val slug = genre.attr("href").substringAfter("$baseUrl/$genreSuffix/").removeSuffix("/")
+                        val newPair = Pair(text, slug)
+
+                        if (!genres.contains(newPair)) {
+                            genres += newPair
+                        }
+
+                        text
+                    }
                 }
-
-                text
             }
         }
-    }
 
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.just(
-        listOf(
+        val sChapters = listOf(
             SChapter.create().apply {
                 name = manga.title
                 url = manga.url
             },
-        ),
-    )
+        )
 
-    override fun chapterListSelector() = throw UnsupportedOperationException()
-    override fun chapterFromElement(element: Element) = throw UnsupportedOperationException()
+        return SMangaUpdate(sManga, sChapters)
+    }
 
+    // =============================== Pages ===============================
     protected open val pageListSelector =
         "div.wp-content p > img:not(noscript img), " +
             "div.wp-content div#lector > img:not(noscript img), " +
@@ -121,19 +148,12 @@ abstract class VerComics(
             "div.wp-content > img, div.wp-content > p img, " +
             "div.post-imgs > img"
 
-    override fun pageListParse(document: Document): List<Page> = document.select(pageListSelector)
-        .mapIndexed { i, img -> Page(i, imageUrl = img.imgAttr()) }
-
-    protected open var genres = arrayOf(Pair("Ver todos", ""))
-
-    override fun getFilterList(): FilterList {
-        val filters = listOf(
-            Filter.Header("Los filtros serán ignorados si la búsqueda no está vacía."),
-            Filter.Separator(),
-            Genre(genres),
-        )
-
-        return FilterList(filters)
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val response = client.get(baseUrl + chapter.url)
+        val document = response.asJsoup()
+        return document.select(pageListSelector).mapIndexed { i, img ->
+            Page(i, imageUrl = img.imgAttr() ?: img.attr("abs:src"))
+        }
     }
 
     protected open fun Element.imgAttr(): String? = when {
@@ -145,32 +165,35 @@ abstract class VerComics(
     }
 
     private fun String.getSrcSetImage(): String? = this.split(" ")
-        .filter(URL_REGEX::matches)
-        .maxOfOrNull(String::toString)
+        .filter { URL_REGEX.matches(it) }
+        .maxOfOrNull { it }
 
-    // Replace the baseUrl and genreSuffix in the following string
-    // Array.from(document.querySelectorAll('div.tagcloud a.tag-cloud-link')).map(a => `Pair("${a.innerText}", "${a.href.replace('$baseUrl/genreSuffix/', '')}")`).join(',\n')
-    class Genre(genres: Array<Pair<String, String>>) :
-        UriPartFilter(
-            "Filtrar por género",
-            genres,
+    // ============================== Filters ==============================
+    protected open var genres = arrayOf(Pair("Ver todos", ""))
+
+    override fun getFilterList(data: JsonElement?): FilterList {
+        val filters = listOf(
+            Filter.Header("Los filtros serán ignorados si la búsqueda no está vacía."),
+            Filter.Separator(),
+            GenreFilter(genres),
         )
 
-    override fun latestUpdatesRequest(page: Int) = throw UnsupportedOperationException()
-
-    override fun latestUpdatesSelector() = throw UnsupportedOperationException()
-
-    override fun latestUpdatesNextPageSelector() = throw UnsupportedOperationException()
-
-    override fun latestUpdatesFromElement(element: Element) = throw UnsupportedOperationException()
-
-    override fun imageUrlParse(document: Document) = throw UnsupportedOperationException()
-
-    companion object {
-        val URL_REGEX = """^(https?://[^\s/$.?#].[^\s]*)${'$'}""".toRegex()
+        return FilterList(filters)
     }
 
-    open class UriPartFilter(displayName: String, private val vals: Array<Pair<String, String>>) : Filter.Select<String>(displayName, vals.map { it.first }.toTypedArray()) {
+    open class UriPartFilter(
+        displayName: String,
+        private val vals: Array<Pair<String, String>>,
+    ) : Filter.Select<String>(
+        displayName,
+        vals.map { it.first }.toTypedArray(),
+    ) {
         fun toUriPart() = vals[state].second
+    }
+
+    class GenreFilter(genres: Array<Pair<String, String>>) : UriPartFilter("Filtrar por género", genres)
+
+    companion object {
+        private val URL_REGEX = """^(https?://[^\s/$.?#].\S*)$""".toRegex()
     }
 }

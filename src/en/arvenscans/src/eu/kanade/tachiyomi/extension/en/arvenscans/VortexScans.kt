@@ -1,20 +1,7 @@
 package eu.kanade.tachiyomi.extension.en.arvenscans
 
 import eu.kanade.tachiyomi.multisrc.iken.Iken
-import eu.kanade.tachiyomi.network.asObservable
-import eu.kanade.tachiyomi.source.model.SChapter
-import eu.kanade.tachiyomi.source.model.SManga
-import rx.Observable
+import keiyoushi.annotation.Source
 
-class VortexScans :
-    Iken(
-        "Vortex Scans",
-        "en",
-        "https://vortexscans.io",
-        "https://api.vortexscans.io",
-    ) {
-
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = client.newCall(chapterListRequest(manga))
-        .asObservable()
-        .map(::chapterListParse)
-}
+@Source
+abstract class VortexScans : Iken()
