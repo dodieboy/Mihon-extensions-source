@@ -6,13 +6,13 @@ plugins {
 
 keiyoushi {
     name = "Lector Asteria"
-    versionCode = 2
+    versionCode = 0
     contentWarning = ContentWarning.MIXED
-    libVersion = "1.4"
+    libVersion = "1.6"
     theme = "moonlighttl"
 
     source {
         lang = "es"
-        baseUrl = "https://lectorasteria.com"
+        baseUrl = "https://visor.chifa-tong.online"
     }
 }

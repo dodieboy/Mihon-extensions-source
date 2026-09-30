@@ -8,15 +8,10 @@ keiyoushi {
     name = "eBookJapan"
     versionCode = 1
     contentWarning = ContentWarning.MIXED
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         lang = "ja"
         baseUrl = "https://ebookjapan.yahoo.co.jp"
     }
-}
-
-dependencies {
-
-    implementation(project(":lib:cookieinterceptor"))
 }

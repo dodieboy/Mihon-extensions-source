@@ -12,15 +12,15 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.string
+import keiyoushi.zip.coroutines.zipDirectory
 import keiyoushi.zip.readZipEntry
-import keiyoushi.zip.zipDirectoryAsync
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonArray
@@ -493,7 +493,7 @@ abstract class Madokami :
     private suspend fun getZipPageList(chapter: SChapter): List<Page> {
         val url = baseUrl + chapter.url
         val directory = try {
-            client.zipDirectoryAsync(url, getAuthHeaders())
+            client.zipDirectory(url, getAuthHeaders())
         } catch (e: IOException) {
             if (e.message?.contains("Content-Range") == true) {
                 throw IOException("Refresh episode list and try again", e)

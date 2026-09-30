@@ -6,17 +6,12 @@ plugins {
 
 keiyoushi {
     name = "ToonBr"
-    versionCode = 3
+    versionCode = 0
     contentWarning = ContentWarning.SAFE
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         lang = "pt-BR"
         baseUrl = "https://beta.toonbr.com"
     }
-}
-
-dependencies {
-
-    implementation(project(":lib:cookieinterceptor"))
 }

@@ -4,68 +4,87 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-internal data class WebSearchPayload(val data: List<WebSearchData> = emptyList())
+internal class WebSearchPayload(val data: List<WebSearchData> = emptyList())
 
 @Serializable
-internal data class WebSearchData(val dataList: List<WebManga> = emptyList())
+internal class WebSearchData(val dataList: List<WebManga> = emptyList())
 
 @Serializable
-internal data class WebManga(
+internal class WebManga(
     val id: Int,
     val title: String,
     @SerialName("vertical_image_url") val verticalImageUrl: String,
 )
 
 @Serializable
-internal data class ApiSearchResponse(
+internal class ApiSearchResponse(
     val data: ApiSearchData? = null,
 )
 
 @Serializable
-internal data class ApiSearchData(
+internal class ApiSearchData(
     val hit: List<ApiManga>? = null,
     val since: Int = -1,
 )
 
 @Serializable
-internal data class ApiManga(
+internal class ApiManga(
     val id: Int,
     val title: String,
     @SerialName("vertical_image_url") val verticalImageUrl: String,
 )
 
 @Serializable
-internal data class ApiMangaResponse(val data: ApiMangaData)
+internal class WebMangaPayload(val data: List<WebMangaData> = emptyList())
 
 @Serializable
-internal data class ApiMangaData(
+internal class WebMangaData(
+    val topicInfo: WebMangaDetails,
+    val comicList: List<WebMangaChapter> = emptyList(),
+)
+
+@Serializable
+internal class WebMangaDetails(
     val title: String,
     @SerialName("vertical_image_url") val verticalImageUrl: String,
-    val user: ApiUser,
+    val user: WebAuthor,
     val description: String,
-    @SerialName("update_status_code") val updateStatusCode: Int,
-    val comics: List<ApiChapter> = emptyList(),
+    @SerialName("update_status") val updateStatus: String,
 )
 
 @Serializable
-internal data class ApiUser(val nickname: String)
+internal class WebAuthor(val nickname: String)
 
 @Serializable
-internal data class ApiChapter(
+internal class WebMangaChapter(
     val id: Int,
     val title: String,
-    @SerialName("can_view") val canView: Boolean = false,
     @SerialName("created_at") val createdAt: Long,
 )
 
 @Serializable
-internal data class WebChapterPayload(val data: List<WebChapterData> = emptyList())
+internal class WebChapterPayload(val data: List<WebChapterData> = emptyList())
 
 @Serializable
-internal data class WebChapterData(val comicInfo: WebChapter)
+internal class WebChapterData(val res: WebChapterResponse)
 
 @Serializable
-internal data class WebChapter(val comicImages: List<WebPage> = emptyList())
+internal class WebChapterResponse(val data: WebChapterResponseData)
 
 @Serializable
-internal data class WebPage(val url: String)
+internal class WebChapterResponseData(
+    @SerialName("comic_info") val comicInfo: WebChapter,
+)
+
+@Serializable
+internal class WebChapter(
+    @SerialName("comic_images") val comicImages: List<WebPage> = emptyList(),
+)
+
+@Serializable
+internal class WebPage(
+    private val url: String,
+    private val url1280: String? = null,
+) {
+    val imageUrl get() = url1280 ?: url
+}

@@ -8,7 +8,7 @@ keiyoushi {
     name = "Baka Manhua"
     versionCode = 10
     contentWarning = ContentWarning.NSFW
-    libVersion = "1.4"
+    libVersion = "1.6"
     theme = "madara"
 
     source {
@@ -18,9 +18,4 @@ keiyoushi {
             custom("https://bakamh.com")
         }
     }
-}
-
-dependencies {
-
-    implementation(project(":lib:randomua"))
 }

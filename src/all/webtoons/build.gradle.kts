@@ -6,9 +6,9 @@ plugins {
 
 keiyoushi {
     name = "Webtoons.com"
-    versionCode = 56
+    versionCode = 1
     contentWarning = ContentWarning.SAFE
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     listOf("en", "id", "th", "es", "fr", "zh-Hant", "de").forEach { langCode ->
         source {
@@ -34,6 +34,5 @@ keiyoushi {
 }
 
 dependencies {
-    implementation(project(":lib:cookieinterceptor"))
     implementation(project(":lib:textinterceptor"))
 }

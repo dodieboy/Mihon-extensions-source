@@ -6,18 +6,13 @@ plugins {
 
 keiyoushi {
     name = "RawINU"
-    versionCode = 5
+    versionCode = 0
     contentWarning = ContentWarning.MIXED
-    libVersion = "1.4"
+    libVersion = "1.6"
     theme = "fmreader"
 
     source {
         lang = "ja"
         baseUrl = "https://rawinu.com"
     }
-}
-
-dependencies {
-
-    implementation(project(":lib:cookieinterceptor"))
 }

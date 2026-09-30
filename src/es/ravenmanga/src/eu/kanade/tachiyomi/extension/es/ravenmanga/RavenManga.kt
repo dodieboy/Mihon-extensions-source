@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.extension.es.ravenmanga
 
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -8,11 +7,12 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.JsonElement
 import okhttp3.FormBody
@@ -151,7 +151,7 @@ abstract class RavenManga : KeiSource() {
             form.select("input").forEach {
                 body.add(it.attr("name"), it.attr("value"))
             }
-            document = client.newCall(POST(url, headers, body.build())).execute().asJsoup()
+            document = client.post(url, headers, body.build()).asJsoup()
         }
         return document.select("main.contenedor-imagen > section img[src], main > img[src]").mapIndexed { i, element ->
             Page(i, imageUrl = element.absUrl("src"))

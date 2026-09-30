@@ -6,9 +6,9 @@ plugins {
 
 keiyoushi {
     name = "C'moA"
-    versionCode = 2
+    versionCode = 0
     contentWarning = ContentWarning.MIXED
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         lang = "ja"
@@ -18,5 +18,4 @@ keiyoushi {
 
 dependencies {
     implementation(project(":lib:speedbinb"))
-    implementation(project(":lib:cookieinterceptor"))
 }

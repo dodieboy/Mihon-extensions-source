@@ -8,15 +8,10 @@ keiyoushi {
     name = "Manga Kingdom"
     versionCode = 1
     contentWarning = ContentWarning.MIXED
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         lang = "ja"
         baseUrl = "https://comic.k-manga.jp"
     }
-}
-
-dependencies {
-
-    implementation(project(":lib:cookieinterceptor"))
 }

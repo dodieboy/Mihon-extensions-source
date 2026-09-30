@@ -6,9 +6,9 @@ plugins {
 
 keiyoushi {
     name = "NihonKuni"
-    versionCode = 8
+    versionCode = 0
     contentWarning = ContentWarning.MIXED
-    libVersion = "1.4"
+    libVersion = "1.6"
     theme = "fmreader"
 
     source {
@@ -17,9 +17,4 @@ keiyoushi {
         // Formerly "MangaGun(漫画軍)"
         id = 3811800324362294701L
     }
-}
-
-dependencies {
-
-    implementation(project(":lib:cookieinterceptor"))
 }

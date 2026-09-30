@@ -6,9 +6,9 @@ plugins {
 
 keiyoushi {
     name = "Mangabz"
-    versionCode = 14
+    versionCode = 0
     contentWarning = ContentWarning.SAFE
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         lang = "zh"
@@ -30,7 +30,5 @@ keiyoushi {
 }
 
 dependencies {
-
-    implementation(project(":lib:cookieinterceptor"))
     implementation(project(":lib:unpacker"))
 }

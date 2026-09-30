@@ -6,12 +6,14 @@ plugins {
 
 keiyoushi {
     name = "Comic Ryu"
-    versionCode = 1
-    contentWarning = ContentWarning.SAFE
-    libVersion = "1.4"
+    versionCode = 2
+    contentWarning = ContentWarning.MIXED
+    libVersion = "1.6"
+    theme = "comiciviewer"
 
     source {
         lang = "ja"
         baseUrl = "https://comic-ryu.jp"
+        versionId = 2
     }
 }

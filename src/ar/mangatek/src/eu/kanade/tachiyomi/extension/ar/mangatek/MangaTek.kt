@@ -1,50 +1,44 @@
 package eu.kanade.tachiyomi.extension.ar.mangatek
 
-import android.content.SharedPreferences
-import android.widget.Toast
-import androidx.preference.ListPreference
-import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
-import keiyoushi.utils.getPreferencesLazy
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonRequestBody
 import keiyoushi.utils.toJsonString
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.security.MessageDigest
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 @Source
-abstract class MangaTek :
-    KeiSource(),
-    ConfigurableSource {
-
-    private var fontSize: Int
-        get() = preferences.getString(FONT_SIZE_PREF, DEFAULT_FONT_SIZE)!!.toInt()
-        set(value) = preferences.edit().putString(FONT_SIZE_PREF, value.toString()).apply()
+abstract class MangaTek : KeiSource() {
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
-        addInterceptor(SpeechBubblePainterInterceptor(fontSize))
+        addInterceptor(SpeechBubblePainterInterceptor())
         rateLimit(3)
     }
-
-    private val preferences: SharedPreferences by getPreferencesLazy()
 
     private fun Response.toMangasPage(): MangasPage {
         val document = this.asJsoup()
@@ -80,10 +74,39 @@ abstract class MangaTek :
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$baseUrl/manga-list".toHttpUrl().newBuilder().apply {
-            addQueryParameter("search", query)
+            if (query.isNotBlank()) {
+                addQueryParameter("search", query.trim())
+            }
             addQueryParameter("page", page.toString())
+            filters.filterIsInstance<UrlPartFilter>().forEach {
+                it.addUrlParameter(this)
+            }
         }.build()
         return client.get(url).toMangasPage()
+    }
+
+    // ============================== Filters ==============================
+
+    override val supportsFilterFetching: Boolean get() = true
+
+    override suspend fun fetchFilterData(): JsonElement {
+        val response = client.get("$API_BASE/api/tags?limit=500")
+        return response.parseAs<JsonElement>()
+    }
+
+    override fun getFilterList(data: JsonElement?): FilterList {
+        val tags = data?.parseAs<TagsResponse>()?.data
+            .orEmpty()
+            .filter { it.counter > 0 }
+            .map { it.name }
+            .distinct()
+            .sorted()
+
+        return FilterList(
+            SortFilter(),
+            StatusFilter(),
+            GenreFilter(tags),
+        )
     }
 
     // ========================= Details & Chapters  =========================
@@ -97,21 +120,6 @@ abstract class MangaTek :
         return fetchMangaUpdate(manga, emptyList(), true, false).manga.apply {
             initialized = true
         }
-    }
-
-    private inline fun <reified T> Document.extractAstroProp(key: String): T {
-        val prop = selectFirst("[props*=$key]")?.attr("props")
-            ?: throw Exception("Unable to find prop with $key")
-        return prop.parseAs<JsonElement>().unwrapAstro().parseAs()
-    }
-
-    private fun JsonElement.unwrapAstro(): JsonElement = when (this) {
-        is JsonArray -> when {
-            size == 2 && this[0] is JsonPrimitive -> this[1].unwrapAstro()
-            else -> JsonArray(map { it.unwrapAstro() })
-        }
-        is JsonObject -> JsonObject(mapValues { it.value.unwrapAstro() })
-        else -> this
     }
 
     override suspend fun fetchMangaUpdate(
@@ -130,40 +138,87 @@ abstract class MangaTek :
         )
     }
 
+    //  ============================== Astro ==============================
+
+    private inline fun <reified T> Document.extractAstroProp(key: String): T {
+        val prop = selectFirst("[props*=$key]")?.attr("props")
+            ?: throw Exception("Unable to find prop with $key")
+        return prop.parseAs<JsonElement>().unwrapAstro().parseAs()
+    }
+
+    private fun JsonElement.unwrapAstro(): JsonElement = when (this) {
+        is JsonArray -> when {
+            size == 2 && this[0] is JsonPrimitive -> this[1].unwrapAstro()
+            else -> JsonArray(map { it.unwrapAstro() })
+        }
+        is JsonObject -> JsonObject(mapValues { it.value.unwrapAstro() })
+        else -> this
+    }
+
     //  ============================== Page ==============================
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val document = client.get("$baseUrl${chapter.url}").asJsoup()
-        val pages = getPages(document)
+        val props: ChapterProps = document.extractAstroProp("imageUrls")
 
-        return pages.mapIndexed { index, page ->
-            val imageUrl = when {
-                page.hasSpeechBubbles() -> "${page.imageUrl}${page.bubbles.toJsonString().toFragment()}"
-                else -> page.imageUrl
+        val (overlayData, apiOffset) = props.overlayBlob?.let { blob ->
+            decrypt(blob) to props.overlayPageOffset
+        } ?: run {
+            val chapterId = props.chapterId
+            val unlockToken = props.unlockToken
+            if (chapterId != null && unlockToken != null) {
+                unlockOverlay(chapterId, unlockToken)
+            } else {
+                null
             }
-            Page(index, imageUrl = imageUrl)
+        } ?: (null to null)
+
+        val offset = apiOffset ?: props.overlayPageOffset ?: 0
+        val overlaysByPageNumber: Map<Int, OverlayPage> = overlayData?.pages
+            ?.associateBy { it.pageNumber } ?: emptyMap()
+
+        return props.imageUrls.mapIndexed { index, imageUrl ->
+            val overlayPage = if (overlaysByPageNumber.isNotEmpty()) {
+                overlaysByPageNumber[index - offset + 1]
+                    ?: overlaysByPageNumber[index - offset]
+                    ?: overlaysByPageNumber[index]
+            } else {
+                null
+            }
+
+            if (overlayPage == null || overlayPage.overlays.isEmpty()) {
+                Page(index, imageUrl = imageUrl)
+            } else {
+                val url = imageUrl.toHttpUrl().newBuilder()
+                    .fragment(overlayPage.overlays.toJsonString())
+                    .build().toString()
+
+                Page(index, imageUrl = url)
+            }
         }
     }
 
-    private fun getPages(document: Document): List<PageDTO> = document.select(".manga-page").map { element ->
-        val imageUrl = element.selectFirst("img")!!.imgAttr()
-        val overlays = element.select(".text-overlay").takeIf(List<Element>::isNotEmpty) ?: return@map PageDTO(imageUrl)
-
-        val bubbles = overlays.map { overlay ->
-            val style = overlay.attr("style")
-            Bubble(
-                text = overlay.text(),
-                left = style.substringAfterLast("left:").substringBefore("%").trim().toFloat(),
-                top = style.substringAfterLast("top:").substringBefore("%").trim().toFloat(),
-                width = style.substringAfterLast("width:").substringBefore("%").trim().toFloat(),
-                height = style.substringAfterLast("height:").substringBefore("%").trim().toFloat(),
-            )
+    private suspend fun unlockOverlay(chapterId: Long, unlockToken: String): Pair<OverlayData, Int?>? {
+        val proof = "$UNLOCK_PROOF_SALT|$unlockToken|$chapterId".sha256Hex()
+        val payload = buildJsonObject {
+            put("chapterId", chapterId)
+            put("token", unlockToken)
+            put("proof", proof)
         }
-
-        PageDTO(imageUrl, bubbles)
+        val response = client.post(
+            url = UNLOCK_API_URL,
+            body = payload.toJsonRequestBody(),
+        )
+        val unlockResponse = response.parseAs<UnlockResponse>()
+        val overlay = unlockResponse.overlay ?: return null
+        val key = unlockResponse.key ?: KEY
+        val overlayData = decrypt(overlay, key)
+        return overlayData to unlockResponse.overlayPageOffset
     }
 
-    fun String.toFragment(): String = "#${this.replace("#", "*")}"
+    private fun String.sha256Hex(): String = MessageDigest.getInstance("SHA-256")
+        .digest(toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
 
     private fun Element.imgAttr(): String = when {
         hasAttr("data-src") -> attr("abs:data-src")
@@ -174,52 +229,41 @@ abstract class MangaTek :
         else -> attr("abs:src")
     }
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        val sizes = arrayOf(
-            "12", "13", "14",
-            "15", "16", "18",
-            "20", "21", "22",
-            "24", "26", "28",
-            "32", "36", "40",
-            "42", "44", "48",
-            "54", "60", "72",
-            "80", "88", "96",
-        )
+    // decrypt
 
-        ListPreference(screen.context).apply {
-            key = FONT_SIZE_PREF
-            title = "Font size"
-            entries = sizes.map {
-                "${it}pt" + if (it == DEFAULT_FONT_SIZE) " - Default" else ""
-            }.toTypedArray()
-            entryValues = sizes
+    private fun String.hexToBytes(): ByteArray {
+        require(length % 2 == 0) { "Invalid hex string length" }
 
-            summary = buildString {
-                appendLine("Font changes will not be applied to downloaded or cached chapters. ")
-                append("\t* %s")
-            }
+        return ByteArray(length / 2) { index ->
+            substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
+    }
 
-            setDefaultValue(fontSize.toString())
+    private fun decrypt(blob: String, keyHex: String = KEY): OverlayData {
+        val (ivHex, ctHex, tagHex) = blob.split(":").also {
+            require(it.size == 3) { "unexpected overlayBlob format" }
+        }
 
-            setOnPreferenceChangeListener { _, newValue ->
-                val selected = newValue as String
-                val index = this.findIndexOfValue(selected)
-                val entry = entries[index] as String
+        val iv = ivHex.hexToBytes()
+        val ciphertext = ctHex.hexToBytes()
+        val tag = tagHex.hexToBytes()
 
-                Toast.makeText(
-                    screen.context,
-                    "Font size changed to '$entry'. Restart app to apply new setting.",
-                    Toast.LENGTH_LONG,
-                ).show()
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(keyHex.hexToBytes(), "AES"),
+                GCMParameterSpec(tag.size * 8, iv),
+            )
+        }
 
-                true
-            }
-        }.also(screen::addPreference)
+        return String(cipher.doFinal(ciphertext + tag), Charsets.UTF_8).parseAs<OverlayData>()
     }
 
     companion object {
-        val PAGE_REGEX = Regex(""".*?\.(webp|png|jpg|jpeg)(?:\?v=\d+)?#\[.*?]""", RegexOption.IGNORE_CASE)
-        private const val FONT_SIZE_PREF = "fontSizePref"
-        private const val DEFAULT_FONT_SIZE = "28"
+        val PAGE_REGEX = Regex(""".*?\.(webp|png|jpg|jpeg)(?:\?[^#]*)?#\[.*?]""", RegexOption.IGNORE_CASE)
+        private const val KEY = "ff453871399fe268588a0936b45376022d85ed0fd1292001d5102f6a30291dc1"
+        private const val UNLOCK_PROOF_SALT = "322c4e08571941fa05abf1a6a2b45c9a9bf7bcc94af61b66"
+        private const val API_BASE = "https://api.mangatek.com"
+        private const val UNLOCK_API_URL = "$API_BASE/api/reader/unlock"
     }
 }
